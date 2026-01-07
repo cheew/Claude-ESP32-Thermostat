@@ -1,17 +1,38 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 1.1.0
- * Last Updated: January 6, 2026
+ * Version: 1.3.0
+ * Last Updated: January 7, 2026
  * 
  * Features:
  * - PID temperature control with AC dimmer
  * - 2.8" TFT touchscreen display (ILI9341)
- * - Web interface with settings
+ * - Web interface with Info, Logs, Schedule, and Settings pages
+ * - Temperature scheduling (up to 8 time slots)
+ * - Temperature history logging (24 hours, 1-minute intervals)
  * - MQTT integration + Home Assistant auto-discovery
  * - AP mode for easy setup
  * - Three display screens: Main, Settings, Simple View
  * - mDNS device discovery
- * - OTA firmware updates
+ * - OTA firmware updates (manual + GitHub auto-update)
+ * - System logging with 20-entry circular buffer
+ * - Mobile-responsive web interface
+ * 
+ * Changelog v1.3.0:
+ * - Added temperature scheduling system (up to 8 time slots, day-specific)
+ * - Added temperature history logging (1440 data points, 1-minute intervals)
+ * - NTP time synchronization for accurate scheduling
+ * - Schedule page with visual editor
+ * - Next scheduled change indicator
+ * - API endpoint for temperature history (/api/temp-history)
+ * 
+ * Changelog v1.2.0:
+ * - Enhanced web interface with Info and Logs pages
+ * - Improved navigation bar across all pages
+ * - Better mobile responsiveness
+ * - System logging with 20-entry circular buffer
+ * - Uptime tracking and memory stats
+ * - Network status details with signal strength
+ * - GitHub auto-update capability
  * 
  * Changelog v1.1.0:
  * - Added mDNS/Bonjour service discovery
@@ -21,6 +42,7 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -38,7 +60,12 @@
 #define ZEROCROSS_PIN 27  // GPIO27 - Zero-cross detection pin (was 18, moved for TFT)
 
 // Firmware version
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.3.0"
+
+// GitHub repository for auto-updates
+const char* github_user = "cheew";
+const char* github_repo = "Claude-ESP32-Thermostat";
+const char* github_firmware_asset = "firmware.bin";
 
 // TFT Display is connected via SPI (defined in TFT_eSPI User_Setup.h):
 // MOSI = GPIO 23, SCK = GPIO 18, CS = GPIO 15, DC = GPIO 2, RST = GPIO 33
@@ -89,6 +116,21 @@ void handleRestart();
 void handleUpdate();
 void handleUpload();
 void handleUploadDone();
+void handleCheckUpdate();
+void handleAutoUpdate();
+void handleInfo();
+void handleLogs();
+void handleSchedule();
+void handleSaveSchedule();
+void handleTempHistory();
+void addLog(String message);
+void logTemperature();
+void checkSchedule();
+void loadSchedule();
+void saveSchedule();
+int getCurrentDayOfWeek();
+String getHTMLHeader(String title, String activePage);
+String getHTMLFooter();
 void initDisplay();
 void updateDisplay();
 void updateSimpleDisplay();
@@ -139,6 +181,35 @@ bool heatingState = false;
 String mode = "auto";     // auto, off, on
 int powerOutput = 0;      // Dimmer power 0-100%
 
+// Logging system
+#define MAX_LOGS 20
+String logMessages[MAX_LOGS];
+int logIndex = 0;
+unsigned long bootTime = 0;
+
+// Temperature history for graphing (1 minute intervals, 24 hours = 1440 points)
+#define TEMP_HISTORY_SIZE 1440
+float tempHistory[TEMP_HISTORY_SIZE];
+int tempHistoryIndex = 0;
+unsigned long lastTempLog = 0;
+const unsigned long tempLogInterval = 60000; // 1 minute
+
+// Schedule system
+#define MAX_SCHEDULE_SLOTS 8
+struct ScheduleSlot {
+  bool enabled;
+  int hour;        // 0-23
+  int minute;      // 0-59
+  float targetTemp; // Target temperature
+  String days;     // "SMTWTFS" - 7 chars for days (S=Sunday, M=Monday, etc)
+};
+
+ScheduleSlot schedule[MAX_SCHEDULE_SLOTS];
+bool scheduleEnabled = false;
+int scheduleSlotCount = 0;
+String nextScheduleTime = "";
+float nextScheduleTemp = 0;
+
 // PID variables
 float Kp = 10.0;          // Proportional gain
 float Ki = 0.5;           // Integral gain
@@ -156,8 +227,13 @@ const unsigned long pidInterval = 1000;  // PID update every 1 second
 void setup() {
   Serial.begin(115200);
   
+  // Record boot time
+  bootTime = millis();
+  
   // Initialize TFT Display first
   initDisplay();
+  
+  addLog("System boot - v" + String(FIRMWARE_VERSION));
   
   // Initialize AC dimmer
   dimmer.begin(NORMAL_MODE, ON);
@@ -170,6 +246,14 @@ void setup() {
   Kp = preferences.getFloat("Kp", 10.0);
   Ki = preferences.getFloat("Ki", 0.5);
   Kd = preferences.getFloat("Kd", 5.0);
+  
+  // Initialize temperature history
+  for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
+    tempHistory[i] = 0.0;
+  }
+  
+  // Load schedule
+  loadSchedule();
   
   // Check if we have WiFi credentials saved
   String savedSSID = preferences.getString("wifi_ssid", "");
@@ -185,6 +269,13 @@ void setup() {
   
   // Initialize temperature sensor
   sensors.begin();
+  
+  // Setup time (NTP) if connected to WiFi
+  if (WiFi.status() == WL_CONNECTED && !apMode) {
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    Serial.println("Syncing time with NTP...");
+    addLog("Syncing time with NTP");
+  }
   
   // Setup MQTT (only if connected to WiFi)
   if (WiFi.status() == WL_CONNECTED && !apMode) {
@@ -250,6 +341,17 @@ void loop() {
   // Check for touch input
   checkTouch();
   
+  // Log temperature to history (every minute)
+  if (millis() - lastTempLog >= tempLogInterval) {
+    logTemperature();
+    lastTempLog = millis();
+  }
+  
+  // Check schedule (every minute)
+  if (scheduleEnabled && millis() - lastTempLog < 1000) {  // Check when we log temp
+    checkSchedule();
+  }
+  
   // Publish to MQTT periodically (only if not in AP mode)
   if (!apMode && millis() - lastMqttPublish >= mqttPublishInterval) {
     publishStatus();
@@ -279,8 +381,11 @@ void connectWiFi() {
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
     apMode = false;
+    addLog("WiFi connected: " + WiFi.localIP().toString());
+    setupMDNS();
   } else {
     Serial.println("\nWiFi connection failed, starting AP mode");
+    addLog("WiFi failed, starting AP mode");
     startAPMode();
   }
 }
@@ -338,6 +443,7 @@ void reconnectMQTT() {
     
     if (mqtt.connect(mqtt_client_id, savedUser.c_str(), savedPass.c_str())) {
       Serial.println("connected");
+      addLog("MQTT connected");
       
       // Subscribe to command topics
       mqtt.subscribe(set_temp_topic.c_str());
@@ -374,6 +480,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       preferences.begin("thermostat", false);
       preferences.putFloat("target", targetTemp);
       preferences.end();
+      addLog("Target temp set to " + String(targetTemp, 1) + "°C (MQTT)");
       publishStatus();
     }
   }
@@ -384,6 +491,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       preferences.begin("thermostat", false);
       preferences.putString("mode", mode);
       preferences.end();
+      addLog("Mode changed to " + mode + " (MQTT)");
       updatePID();
       publishStatus();
     }
@@ -401,6 +509,11 @@ void readTemperature() {
     }
   } else {
     Serial.println("Error reading temperature!");
+    static unsigned long lastTempError = 0;
+    if (millis() - lastTempError > 60000) {  // Log error once per minute
+      addLog("Temperature sensor error!");
+      lastTempError = millis();
+    }
   }
 }
 
@@ -536,38 +649,27 @@ void setupWebServer() {
   server.on("/api/restart", HTTP_POST, handleRestart);
   server.on("/update", handleUpdate);
   server.on("/api/upload", HTTP_POST, handleUploadDone, handleUpload);
+  server.on("/api/check-update", handleCheckUpdate);
+  server.on("/api/auto-update", HTTP_POST, handleAutoUpdate);
+  server.on("/info", handleInfo);
+  server.on("/logs", handleLogs);
+  server.on("/schedule", handleSchedule);
+  server.on("/api/save-schedule", HTTP_POST, handleSaveSchedule);
+  server.on("/api/temp-history", handleTempHistory);
   server.begin();
   Serial.println("Web server started");
+  addLog("Web server started");
 }
 
 void handleRoot() {
-  preferences.begin("thermostat", true);
-  String deviceName = preferences.getString("device_name", "Thermostat");
-  preferences.end();
+  String html = getHTMLHeader("Home", "home");
   
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset='UTF-8'>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>" + deviceName + "</title>";
-  html += "<style>body{font-family:Arial;margin:20px;background:#f0f0f0}";
-  html += ".container{max-width:600px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
-  html += "h1{color:#333;text-align:center}";
-  html += "h2{color:#666;border-bottom:2px solid #4CAF50;padding-bottom:5px}";
-  html += ".status{display:flex;justify-content:space-between;margin:20px 0;padding:15px;background:#e8f5e9;border-radius:5px}";
-  html += ".control{margin:20px 0}";
-  html += "label{display:block;margin:10px 0 5px;font-weight:bold}";
-  html += "input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}";
-  html += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px}";
-  html += "button:hover{background:#45a049}";
-  html += ".btn-secondary{background:#2196F3}";
-  html += ".btn-secondary:hover{background:#0b7dda}";
-  html += ".heating-on{background:#ffebee!important}";
-  html += ".heating-off{background:#e8f5e9!important}";
-  html += ".power-bar{width:100%;height:30px;background:#ddd;border-radius:5px;overflow:hidden}";
-  html += ".power-fill{height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s}";
-  html += ".top-nav{text-align:center;margin-bottom:20px}";
-  html += ".top-nav a{display:inline-block;padding:10px 20px;margin:5px;background:#2196F3;color:white;text-decoration:none;border-radius:5px}";
-  html += ".top-nav a:hover{background:#0b7dda}</style>";
+  if (apMode) {
+    html += "<div class='warning-box'><strong>⚠️ AP Mode Active</strong><br>";
+    html += "Configure WiFi in <a href='/settings'>Settings</a></div>";
+  }
+  
+  // Add auto-refresh script
   html += "<script>setInterval(()=>fetch('/api/status').then(r=>r.json()).then(d=>{";
   html += "document.getElementById('temp').innerText=d.temperature+'°C';";
   html += "document.getElementById('target').innerText=d.setpoint+'°C';";
@@ -575,33 +677,35 @@ void handleRoot() {
   html += "document.getElementById('mode').innerText=d.mode.toUpperCase();";
   html += "document.getElementById('power-val').innerText=d.power+'%';";
   html += "document.getElementById('power-fill').style.width=d.power+'%';";
-  html += "document.querySelector('.status').className='status '+(d.heating?'heating-on':'heating-off');";
-  html += "}),2000);</script></head><body>";
-  html += "<div class='container'>";
-  html += "<div class='top-nav'><a href='/'>Home</a><a href='/settings'>Settings</a></div>";
-  html += "<h1>Reptile Thermostat (PID)</h1>";
+  html += "let statusDiv=document.querySelector('.status');";
+  html += "statusDiv.style.background=d.heating?'#ffebee':'#e8f5e9';";
+  html += "}),2000);</script>";
   
-  if (apMode) {
-    html += "<div style='background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0;text-align:center'>";
-    html += "<strong>AP Mode Active</strong><br>Configure WiFi in <a href='/settings'>Settings</a></div>";
-  }
+  html += "<h2>Current Status</h2>";
+  html += "<div class='status' style='background:" + String(heatingState ? "#ffebee" : "#e8f5e9") + "'>";
+  html += "<div><strong>Current:</strong> <span id='temp'>" + String(currentTemp, 1) + "°C</span></div>";
+  html += "<div><strong>Target:</strong> <span id='target'>" + String(targetTemp, 1) + "°C</span></div>";
+  html += "<div><strong>Heating:</strong> <span id='heating'>" + String(heatingState ? "ON" : "OFF") + "</span></div>";
+  html += "<div><strong>Mode:</strong> <span id='mode'>" + mode + "</span></div>";
+  html += "</div>";
   
-  html += "<div class='status'><div><strong>Current:</strong> <span id='temp'>" + String(currentTemp, 1) + "°C</span></div>";
-  html += "<div><strong>Target:</strong> <span id='target'>" + String(targetTemp, 1) + "°C</span></div></div>";
-  html += "<div class='status'><div><strong>Heating:</strong> <span id='heating'>" + String(heatingState ? "ON" : "OFF") + "</span></div>";
-  html += "<div><strong>Mode:</strong> <span id='mode'>" + mode + "</span></div></div>";
   html += "<div style='margin:20px 0'><strong>Power Output: <span id='power-val'>" + String(powerOutput) + "%</span></strong>";
-  html += "<div class='power-bar'><div id='power-fill' class='power-fill' style='width:" + String(powerOutput) + "%'></div></div></div>";
+  html += "<div style='width:100%;height:30px;background:#ddd;border-radius:5px;overflow:hidden'>";
+  html += "<div id='power-fill' style='height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s;width:" + String(powerOutput) + "%'></div></div></div>";
+  
   html += "<form action='/api/set' method='POST'>";
   html += "<h2>Temperature Control</h2>";
   html += "<div class='control'><label>Target Temperature (°C):</label>";
   html += "<input type='number' name='target' value='" + String(targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
   html += "<div class='control'><label>Mode:</label>";
-  html += "<select name='mode'><option value='auto'" + String(mode == "auto" ? " selected" : "") + ">Auto (PID)</option>";
+  html += "<select name='mode'>";
+  html += "<option value='auto'" + String(mode == "auto" ? " selected" : "") + ">Auto (PID)</option>";
   html += "<option value='on'" + String(mode == "on" ? " selected" : "") + ">Manual On (100%)</option>";
-  html += "<option value='off'" + String(mode == "off" ? " selected" : "") + ">Off</option></select></div>";
-  html += "<button type='submit'>Update Settings</button></form></div></body></html>";
+  html += "<option value='off'" + String(mode == "off" ? " selected" : "") + ">Off</option>";
+  html += "</select></div>";
+  html += "<button type='submit'>Update Settings</button></form>";
   
+  html += getHTMLFooter();
   server.send(200, "text/html", html);
 }
 
@@ -627,6 +731,7 @@ void handleSet() {
       preferences.begin("thermostat", false);
       preferences.putFloat("target", targetTemp);
       preferences.end();
+      addLog("Target temp set to " + String(targetTemp, 1) + "°C (Web)");
     }
   }
   
@@ -638,6 +743,7 @@ void handleSet() {
       preferences.begin("thermostat", false);
       preferences.putString("mode", mode);
       preferences.end();
+      addLog("Mode changed to " + mode + " (Web)");
     }
   }
   
@@ -686,40 +792,17 @@ void handleSettings() {
   String savedSSID = preferences.getString("wifi_ssid", ssid);
   String savedMQTTBroker = preferences.getString("mqtt_broker", mqtt_server);
   String savedMQTTUser = preferences.getString("mqtt_user", mqtt_user);
+  String savedDeviceName = preferences.getString("device_name", "Thermostat");
   preferences.end();
   
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset='UTF-8'>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>Settings - Reptile Thermostat</title>";
-  html += "<style>body{font-family:Arial;margin:20px;background:#f0f0f0}";
-  html += ".container{max-width:600px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
-  html += "h1{color:#333;text-align:center}";
-  html += "h2{color:#666;border-bottom:2px solid #4CAF50;padding-bottom:5px;margin-top:30px}";
-  html += ".control{margin:20px 0}";
-  html += "label{display:block;margin:10px 0 5px;font-weight:bold}";
-  html += "input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}";
-  html += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px}";
-  html += "button:hover{background:#45a049}";
-  html += ".btn-secondary{background:#2196F3}";
-  html += ".btn-secondary:hover{background:#0b7dda}";
-  html += ".btn-danger{background:#f44336}";
-  html += ".btn-danger:hover{background:#da190b}";
-  html += ".top-nav{text-align:center;margin-bottom:20px}";
-  html += ".top-nav a{display:inline-block;padding:10px 20px;margin:5px;background:#2196F3;color:white;text-decoration:none;border-radius:5px}";
-  html += ".top-nav a:hover{background:#0b7dda}";
-  html += ".info{background:#e3f2fd;padding:15px;border-radius:5px;margin:10px 0}";
-  html += ".warning{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0}</style></head><body>";
-  html += "<div class='container'>";
-  html += "<div class='top-nav'><a href='/'>Home</a><a href='/settings'>Settings</a></div>";
-  html += "<h1>Settings</h1>";
+  String html = getHTMLHeader("Settings", "settings");
   
   if (apMode) {
-    html += "<div class='warning'><strong>AP Mode Active</strong><br>";
+    html += "<div class='warning-box'><strong>⚠️ AP Mode Active</strong><br>";
     html += "Connect to WiFi network: <strong>" + String(ap_ssid) + "</strong><br>";
     html += "Password: <strong>" + String(ap_password) + "</strong></div>";
   } else {
-    html += "<div class='info'><strong>Status:</strong> Connected to WiFi<br>";
+    html += "<div class='info-box'><strong>Status:</strong> Connected to WiFi ✓<br>";
     html += "<strong>IP:</strong> " + WiFi.localIP().toString() + "</div>";
   }
   
@@ -727,11 +810,6 @@ void handleSettings() {
   
   html += "<h2>Device Settings</h2>";
   html += "<div class='control'><label>Device Name:</label>";
-  
-  preferences.begin("thermostat", true);
-  String savedDeviceName = preferences.getString("device_name", "Thermostat");
-  preferences.end();
-  
   html += "<input type='text' name='device_name' value='" + savedDeviceName + "' maxlength='15'></div>";
   
   html += "<h2>WiFi Configuration</h2>";
@@ -760,15 +838,54 @@ void handleSettings() {
   
   html += "<button type='submit'>Save All Settings</button></form>";
   
-  html += "<h2 style='margin-top:30px'>Firmware</h2>";
-  html += "<div class='info'><strong>Current Version:</strong> " + String(FIRMWARE_VERSION) + "</div>";
-  html += "<a href='/update'><button class='btn-secondary'>Update Firmware</button></a>";
+  html += "<h2>Firmware</h2>";
+  html += "<div class='info-box'><strong>Current Version:</strong> " + String(FIRMWARE_VERSION) + "</div>";
   
+  html += "<div id='update-status' style='margin:10px 0'></div>";
+  
+  html += "<button type='button' class='btn-secondary' onclick='checkForUpdates()' id='check-btn'>Check for Updates</button>";
+  html += "<a href='/update'><button type='button' class='btn-secondary'>Manual Upload</button></a>";
+  
+  html += "<script>";
+  html += "function checkForUpdates(){";
+  html += "document.getElementById('check-btn').disabled=true;";
+  html += "document.getElementById('check-btn').innerText='Checking...';";
+  html += "fetch('/api/check-update').then(r=>r.json()).then(d=>{";
+  html += "let status=document.getElementById('update-status');";
+  html += "if(d.update_available){";
+  html += "status.innerHTML='<div class=\"warning-box\"><strong>⚡ Update Available!</strong><br>Latest: v'+d.latest_version+'<br>'+d.release_notes+'<br><button class=\"btn-secondary\" onclick=\"autoUpdate()\">Install Update</button></div>';";
+  html += "}else{";
+  html += "status.innerHTML='<div class=\"info-box\">✓ You are running the latest version</div>';";
+  html += "}";
+  html += "document.getElementById('check-btn').disabled=false;";
+  html += "document.getElementById('check-btn').innerText='Check for Updates';";
+  html += "}).catch(e=>{";
+  html += "document.getElementById('update-status').innerHTML='<div class=\"warning-box\">❌ Could not check for updates. Check internet connection.</div>';";
+  html += "document.getElementById('check-btn').disabled=false;";
+  html += "document.getElementById('check-btn').innerText='Check for Updates';";
+  html += "});";
+  html += "}";
+  html += "function autoUpdate(){";
+  html += "if(!confirm('Download and install update? Device will restart.'))return;";
+  html += "document.getElementById('update-status').innerHTML='<div class=\"info-box\">⏳ Downloading update... Do not power off!</div>';";
+  html += "fetch('/api/auto-update',{method:'POST'}).then(r=>r.json()).then(d=>{";
+  html += "if(d.success){";
+  html += "document.getElementById('update-status').innerHTML='<div class=\"info-box\">✓ Update successful! Device restarting...</div>';";
+  html += "setTimeout(()=>location.href='/',15000);";
+  html += "}else{";
+  html += "document.getElementById('update-status').innerHTML='<div class=\"warning-box\">❌ Update failed: '+d.error+'</div>';";
+  html += "}";
+  html += "}).catch(e=>{";
+  html += "document.getElementById('update-status').innerHTML='<div class=\"warning-box\">❌ Update failed. Try manual upload.</div>';";
+  html += "});";
+  html += "}";
+  html += "</script>";
+  
+  html += "<h2>System Actions</h2>";
   html += "<form action='/api/restart' method='POST' style='margin-top:20px'>";
   html += "<button type='submit' class='btn-danger' onclick='return confirm(\"Restart device?\")'>Restart Device</button></form>";
   
-  html += "</div></body></html>";
-  
+  html += getHTMLFooter();
   server.send(200, "text/html", html);
 }
 
@@ -823,6 +940,8 @@ void handleSaveSettings() {
   integral = 0;
   previousError = 0;
   
+  addLog("Settings saved, restarting...");
+  
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta charset='UTF-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
@@ -861,46 +980,143 @@ void handleRestart() {
 // ===== OTA UPDATE FUNCTIONS =====
 
 void handleUpdate() {
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset='UTF-8'>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>Firmware Update</title>";
-  html += "<style>body{font-family:Arial;margin:20px;background:#f0f0f0}";
-  html += ".container{max-width:600px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
-  html += "h1{color:#333;text-align:center}";
-  html += ".info{background:#e3f2fd;padding:15px;border-radius:5px;margin:10px 0}";
-  html += ".warning{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0}";
-  html += "input[type=file]{width:100%;padding:10px;margin:10px 0}";
-  html += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px}";
-  html += "button:hover{background:#45a049}";
-  html += ".btn-secondary{background:#2196F3}";
-  html += ".btn-secondary:hover{background:#0b7dda}</style></head><body>";
-  html += "<div class='container'><h1>Firmware Update</h1>";
-  
-  html += "<div class='info'>";
-  html += "<strong>Current Version:</strong> " + String(FIRMWARE_VERSION) + "<br>";
-  html += "<strong>Device:</strong> ";
+  String html = getHTMLHeader("Firmware Update", "settings");
   
   preferences.begin("thermostat", true);
   String deviceName = preferences.getString("device_name", "Thermostat");
   preferences.end();
   
-  html += deviceName + "</div>";
+  html += "<div class='info-box'>";
+  html += "<strong>Current Version:</strong> " + String(FIRMWARE_VERSION) + "<br>";
+  html += "<strong>Device:</strong> " + deviceName + "</div>";
   
-  html += "<div class='warning'><strong>⚠️ Warning:</strong><br>";
+  html += "<div class='warning-box'><strong>⚠️ Warning:</strong><br>";
   html += "• Do not power off during update<br>";
   html += "• Update takes 30-60 seconds<br>";
   html += "• Device will restart automatically</div>";
   
   html += "<h2>Upload Firmware</h2>";
   html += "<form method='POST' action='/api/upload' enctype='multipart/form-data'>";
-  html += "<input type='file' name='firmware' accept='.bin' required>";
+  html += "<input type='file' name='firmware' accept='.bin' required style='margin:20px 0'>";
   html += "<button type='submit'>Upload Firmware</button></form>";
   
-  html += "<br><a href='/settings'><button class='btn-secondary'>Back to Settings</button></a>";
-  html += "</div></body></html>";
+  html += "<a href='/settings'><button type='button' class='btn-secondary'>Back to Settings</button></a>";
   
+  html += getHTMLFooter();
   server.send(200, "text/html", html);
+}
+
+// ===== AUTO-UPDATE FROM GITHUB =====
+
+void handleCheckUpdate() {
+  if (!apMode && WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "https://api.github.com/repos/" + String(github_user) + "/" + String(github_repo) + "/releases/latest";
+    
+    http.begin(url);
+    http.addHeader("Accept", "application/vnd.github.v3+json");
+    
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+      String payload = http.getString();
+      
+      // Parse JSON manually (simple parsing for tag_name)
+      int tagIndex = payload.indexOf("\"tag_name\"");
+      if (tagIndex > 0) {
+        int startQuote = payload.indexOf("\"", tagIndex + 12);
+        int endQuote = payload.indexOf("\"", startQuote + 1);
+        String latestVersion = payload.substring(startQuote + 1, endQuote);
+        
+        // Remove 'v' prefix if present
+        if (latestVersion.startsWith("v")) {
+          latestVersion = latestVersion.substring(1);
+        }
+        
+        // Get release notes
+        int bodyIndex = payload.indexOf("\"body\"");
+        String releaseNotes = "";
+        if (bodyIndex > 0) {
+          int startBody = payload.indexOf("\"", bodyIndex + 8);
+          int endBody = payload.indexOf("\"", startBody + 1);
+          releaseNotes = payload.substring(startBody + 1, startBody + 100); // First 100 chars
+          if (releaseNotes.length() > 97) releaseNotes = releaseNotes.substring(0, 97) + "...";
+        }
+        
+        // Compare versions
+        bool updateAvailable = (latestVersion != String(FIRMWARE_VERSION));
+        
+        String response = "{\"update_available\":" + String(updateAvailable ? "true" : "false");
+        response += ",\"current_version\":\"" + String(FIRMWARE_VERSION) + "\"";
+        response += ",\"latest_version\":\"" + latestVersion + "\"";
+        response += ",\"release_notes\":\"" + releaseNotes + "\"";
+        response += "}";
+        
+        server.send(200, "application/json", response);
+        http.end();
+        return;
+      }
+    }
+    
+    http.end();
+  }
+  
+  // Error response
+  server.send(500, "application/json", "{\"error\":\"Could not check for updates\"}");
+}
+
+void handleAutoUpdate() {
+  if (apMode || WiFi.status() != WL_CONNECTED) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"No internet connection\"}");
+    return;
+  }
+  
+  addLog("Starting auto-update from GitHub");
+  
+  HTTPClient http;
+  String url = "https://github.com/" + String(github_user) + "/" + String(github_repo) + "/releases/latest/download/" + String(github_firmware_asset);
+  
+  http.begin(url);
+  int httpCode = http.GET();
+  
+  if (httpCode == 200 || httpCode == 302) {
+    // Follow redirect if needed
+    if (httpCode == 302) {
+      String redirectUrl = http.getLocation();
+      http.end();
+      http.begin(redirectUrl);
+      httpCode = http.GET();
+    }
+    
+    if (httpCode == 200) {
+      int contentLength = http.getSize();
+      
+      if (contentLength > 0) {
+        bool canBegin = Update.begin(contentLength);
+        
+        if (canBegin) {
+          WiFiClient* stream = http.getStreamPtr();
+          size_t written = Update.writeStream(*stream);
+          
+          if (written == contentLength) {
+            if (Update.end()) {
+              if (Update.isFinished()) {
+                addLog("Update successful, restarting");
+                server.send(200, "application/json", "{\"success\":true}");
+                delay(1000);
+                ESP.restart();
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  http.end();
+  addLog("Update failed");
+  server.send(500, "application/json", "{\"success\":false,\"error\":\"Download or install failed\"}");
 }
 
 void handleUpload() {
@@ -1479,4 +1695,498 @@ void drawSettingsScreen() {
   tft.setCursor(10, 224);
   tft.print("FW: ");
   tft.print(FIRMWARE_VERSION);
+}
+
+// ===== LOGGING SYSTEM =====
+
+void addLog(String message) {
+  // Get timestamp
+  unsigned long uptime = millis() / 1000; // seconds
+  unsigned long hours = uptime / 3600;
+  unsigned long minutes = (uptime % 3600) / 60;
+  unsigned long seconds = uptime % 60;
+  
+  char timestamp[20];
+  sprintf(timestamp, "[%02lu:%02lu:%02lu]", hours, minutes, seconds);
+  
+  // Add to circular buffer
+  logMessages[logIndex] = String(timestamp) + " " + message;
+  logIndex = (logIndex + 1) % MAX_LOGS;
+  
+  Serial.println(String(timestamp) + " " + message);
+}
+
+// ===== COMMON HTML HEADER =====
+
+String getHTMLHeader(String title, String activePage) {
+  preferences.begin("thermostat", true);
+  String deviceName = preferences.getString("device_name", "Thermostat");
+  preferences.end();
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>" + title + " - " + deviceName + "</title>";
+  html += "<style>";
+  html += "body{font-family:Arial;margin:0;padding:20px;background:#f0f0f0}";
+  html += "@media (max-width:640px){body{padding:10px}}";
+  html += ".container{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
+  html += "@media (max-width:640px){.container{padding:15px}}";
+  html += ".header{background:linear-gradient(135deg,#4CAF50,#45a049);color:white;padding:20px;border-radius:10px 10px 0 0;margin:-20px -20px 20px -20px;text-align:center}";
+  html += ".header h1{margin:0;font-size:24px}";
+  html += ".header .subtitle{margin:5px 0 0 0;font-size:12px;opacity:0.9}";
+  html += ".nav{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-bottom:20px}";
+  html += ".nav a{flex:1;min-width:100px;padding:12px 20px;background:#2196F3;color:white;text-decoration:none;border-radius:5px;text-align:center;transition:background 0.3s}";
+  html += ".nav a:hover{background:#0b7dda}";
+  html += ".nav a.active{background:#4CAF50}";
+  html += "@media (max-width:640px){.nav a{min-width:80px;padding:10px 15px;font-size:14px}}";
+  html += "h2{color:#666;border-bottom:2px solid #4CAF50;padding-bottom:5px;margin-top:30px}";
+  html += ".status{display:flex;justify-content:space-between;margin:20px 0;padding:15px;background:#e8f5e9;border-radius:5px}";
+  html += "@media (max-width:640px){.status{flex-direction:column;gap:10px}}";
+  html += ".control{margin:20px 0}";
+  html += "label{display:block;margin:10px 0 5px;font-weight:bold}";
+  html += "input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}";
+  html += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px}";
+  html += "button:hover{background:#45a049}";
+  html += ".btn-secondary{background:#2196F3}";
+  html += ".btn-secondary:hover{background:#0b7dda}";
+  html += ".btn-danger{background:#f44336}";
+  html += ".btn-danger:hover{background:#da190b}";
+  html += ".info-box{background:#e3f2fd;padding:15px;border-radius:5px;margin:10px 0;border-left:4px solid #2196F3}";
+  html += ".warning-box{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0;border-left:4px solid #ffc107}";
+  html += ".stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;margin:20px 0}";
+  html += ".stat-card{background:#f5f5f5;padding:15px;border-radius:5px;text-align:center}";
+  html += ".stat-value{font-size:24px;font-weight:bold;color:#4CAF50}";
+  html += ".stat-label{font-size:12px;color:#666;margin-top:5px}";
+  html += ".log-entry{padding:10px;border-bottom:1px solid #eee;font-family:monospace;font-size:14px}";
+  html += ".log-entry:last-child{border-bottom:none}";
+  html += ".footer{text-align:center;margin-top:30px;padding-top:20px;border-top:1px solid #ddd;color:#666;font-size:12px}";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<div class='header'><h1>" + deviceName + "</h1>";
+  html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(FIRMWARE_VERSION) + "</div></div>";
+  html += "<div class='nav'>";
+  html += "<a href='/' class='" + String(activePage == "home" ? "active" : "") + "'>🏠 Home</a>";
+  html += "<a href='/schedule' class='" + String(activePage == "schedule" ? "active" : "") + "'>📅 Schedule</a>";
+  html += "<a href='/info' class='" + String(activePage == "info" ? "active" : "") + "'>ℹ️ Info</a>";
+  html += "<a href='/logs' class='" + String(activePage == "logs" ? "active" : "") + "'>📋 Logs</a>";
+  html += "<a href='/settings' class='" + String(activePage == "settings" ? "active" : "") + "'>⚙️ Settings</a>";
+  html += "</div>";
+  
+  return html;
+}
+
+String getHTMLFooter() {
+  String html = "<div class='footer'>";
+  html += "ESP32 Reptile Thermostat v" + String(FIRMWARE_VERSION);
+  html += " | Uptime: ";
+  
+  unsigned long uptime = millis() / 1000;
+  unsigned long days = uptime / 86400;
+  unsigned long hours = (uptime % 86400) / 3600;
+  unsigned long minutes = (uptime % 3600) / 60;
+  
+  if (days > 0) html += String(days) + "d ";
+  html += String(hours) + "h " + String(minutes) + "m";
+  html += "</div></div></body></html>";
+  
+  return html;
+}
+
+// ===== INFO PAGE =====
+
+void handleInfo() {
+  String html = getHTMLHeader("Device Info", "info");
+  
+  if (apMode) {
+    html += "<div class='warning-box'><strong>⚠️ AP Mode Active</strong><br>";
+    html += "Connect to WiFi network in <a href='/settings'>Settings</a></div>";
+  }
+  
+  html += "<h2>Device Information</h2>";
+  
+  preferences.begin("thermostat", true);
+  String deviceName = preferences.getString("device_name", "Thermostat");
+  preferences.end();
+  
+  html += "<div class='stat-grid'>";
+  html += "<div class='stat-card'><div class='stat-value'>" + deviceName + "</div><div class='stat-label'>Device Name</div></div>";
+  html += "<div class='stat-card'><div class='stat-value'>" + String(FIRMWARE_VERSION) + "</div><div class='stat-label'>Firmware</div></div>";
+  
+  unsigned long uptime = millis() / 1000;
+  unsigned long days = uptime / 86400;
+  unsigned long hours = (uptime % 86400) / 3600;
+  unsigned long minutes = (uptime % 3600) / 60;
+  String uptimeStr = "";
+  if (days > 0) uptimeStr += String(days) + "d ";
+  uptimeStr += String(hours) + "h " + String(minutes) + "m";
+  
+  html += "<div class='stat-card'><div class='stat-value'>" + uptimeStr + "</div><div class='stat-label'>Uptime</div></div>";
+  html += "<div class='stat-card'><div class='stat-value'>" + String(ESP.getFreeHeap() / 1024) + " KB</div><div class='stat-label'>Free Memory</div></div>";
+  html += "</div>";
+  
+  html += "<h2>Network Status</h2>";
+  html += "<div class='info-box'>";
+  if (WiFi.status() == WL_CONNECTED) {
+    html += "<strong>WiFi:</strong> Connected ✓<br>";
+    html += "<strong>SSID:</strong> " + WiFi.SSID() + "<br>";
+    html += "<strong>IP Address:</strong> " + WiFi.localIP().toString() + "<br>";
+    html += "<strong>Signal Strength:</strong> " + String(WiFi.RSSI()) + " dBm<br>";
+    html += "<strong>MAC Address:</strong> " + WiFi.macAddress() + "<br>";
+    
+    // mDNS hostname
+    preferences.begin("thermostat", true);
+    String hostname = preferences.getString("device_name", "Thermostat");
+    preferences.end();
+    hostname.replace(" ", "-");
+    hostname.toLowerCase();
+    html += "<strong>mDNS:</strong> " + hostname + ".local";
+  } else if (apMode) {
+    html += "<strong>Mode:</strong> Access Point<br>";
+    html += "<strong>SSID:</strong> " + String(ap_ssid) + "<br>";
+    html += "<strong>IP Address:</strong> " + WiFi.softAPIP().toString();
+  } else {
+    html += "<strong>WiFi:</strong> Not Connected ❌";
+  }
+  html += "</div>";
+  
+  html += "<h2>MQTT Status</h2>";
+  html += "<div class='info-box'>";
+  if (mqtt.connected()) {
+    html += "<strong>Status:</strong> Connected ✓<br>";
+    
+    preferences.begin("thermostat", true);
+    String broker = preferences.getString("mqtt_broker", mqtt_server);
+    preferences.end();
+    
+    html += "<strong>Broker:</strong> " + broker + ":" + String(mqtt_port) + "<br>";
+    html += "<strong>Client ID:</strong> " + String(mqtt_client_id);
+  } else {
+    html += "<strong>Status:</strong> Disconnected ❌<br>";
+    html += "MQTT may be disabled or broker unreachable";
+  }
+  html += "</div>";
+  
+  html += "<h2>Sensor Information</h2>";
+  html += "<div class='stat-grid'>";
+  html += "<div class='stat-card'><div class='stat-value'>" + String(currentTemp, 1) + "°C</div><div class='stat-label'>Current Temp</div></div>";
+  html += "<div class='stat-card'><div class='stat-value'>" + String(targetTemp, 1) + "°C</div><div class='stat-label'>Target Temp</div></div>";
+  html += "<div class='stat-card'><div class='stat-value'>" + String(powerOutput) + "%</div><div class='stat-label'>Power Output</div></div>";
+  html += "<div class='stat-card'><div class='stat-value'>" + mode + "</div><div class='stat-label'>Mode</div></div>";
+  html += "</div>";
+  
+  html += "<h2>PID Parameters</h2>";
+  html += "<div class='info-box'>";
+  html += "<strong>Kp:</strong> " + String(Kp, 2) + " | ";
+  html += "<strong>Ki:</strong> " + String(Ki, 2) + " | ";
+  html += "<strong>Kd:</strong> " + String(Kd, 2);
+  html += "</div>";
+  
+  html += getHTMLFooter();
+  server.send(200, "text/html", html);
+}
+
+// ===== LOGS PAGE =====
+
+void handleLogs() {
+  String html = getHTMLHeader("System Logs", "logs");
+  
+  html += "<h2>Recent Events</h2>";
+  html += "<div class='info-box'>";
+  html += "Showing last " + String(MAX_LOGS) + " log entries (newest first)";
+  html += "</div>";
+  
+  html += "<div style='background:#f9f9f9;border-radius:5px;padding:10px;max-height:500px;overflow-y:auto'>";
+  
+  bool hasLogs = false;
+  // Display logs in reverse order (newest first)
+  for (int i = 0; i < MAX_LOGS; i++) {
+    int idx = (logIndex - 1 - i + MAX_LOGS) % MAX_LOGS;
+    if (logMessages[idx].length() > 0) {
+      html += "<div class='log-entry'>" + logMessages[idx] + "</div>";
+      hasLogs = true;
+    }
+  }
+  
+  if (!hasLogs) {
+    html += "<div class='log-entry'>No logs yet...</div>";
+  }
+  
+  html += "</div>";
+  
+  html += "<div style='margin-top:20px'>";
+  html += "<button onclick='location.reload()' class='btn-secondary'>Refresh Logs</button>";
+  html += "</div>";
+  
+  html += getHTMLFooter();
+  server.send(200, "text/html", html);
+}
+
+// ===== SCHEDULE SYSTEM =====
+
+int getCurrentDayOfWeek() {
+  // Get current time
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  return timeinfo->tm_wday; // 0=Sunday, 1=Monday, ... 6=Saturday
+}
+
+void loadSchedule() {
+  preferences.begin("thermostat", true);
+  scheduleEnabled = preferences.getBool("sched_enabled", false);
+  scheduleSlotCount = preferences.getInt("sched_count", 0);
+  
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    String prefix = "s" + String(i) + "_";
+    schedule[i].enabled = preferences.getBool((prefix + "en").c_str(), false);
+    schedule[i].hour = preferences.getInt((prefix + "h").c_str(), 0);
+    schedule[i].minute = preferences.getInt((prefix + "m").c_str(), 0);
+    schedule[i].targetTemp = preferences.getFloat((prefix + "t").c_str(), 28.0);
+    schedule[i].days = preferences.getString((prefix + "d").c_str(), "SMTWTFS");
+  }
+  preferences.end();
+  
+  if (scheduleSlotCount == 0) {
+    // Initialize default schedule (2 slots)
+    scheduleSlotCount = 2;
+    schedule[0] = {true, 7, 0, 28.0, "SMTWTFS"};  // 7:00 AM - 28°C
+    schedule[1] = {true, 22, 0, 24.0, "SMTWTFS"}; // 10:00 PM - 24°C
+  }
+}
+
+void saveSchedule() {
+  preferences.begin("thermostat", false);
+  preferences.putBool("sched_enabled", scheduleEnabled);
+  preferences.putInt("sched_count", scheduleSlotCount);
+  
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    String prefix = "s" + String(i) + "_";
+    preferences.putBool((prefix + "en").c_str(), schedule[i].enabled);
+    preferences.putInt((prefix + "h").c_str(), schedule[i].hour);
+    preferences.putInt((prefix + "m").c_str(), schedule[i].minute);
+    preferences.putFloat((prefix + "t").c_str(), schedule[i].targetTemp);
+    preferences.putString((prefix + "d").c_str(), schedule[i].days);
+  }
+  preferences.end();
+  
+  addLog("Schedule saved");
+}
+
+void checkSchedule() {
+  if (!scheduleEnabled) return;
+  
+  // Get current time
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  int currentHour = timeinfo->tm_hour;
+  int currentMinute = timeinfo->tm_min;  // Fixed: tm_min not tm_minute
+  int currentDay = timeinfo->tm_wday; // 0=Sunday
+  
+  String dayChar = "SMTWTFS";
+  char todayChar = dayChar[currentDay];
+  
+  // Check each schedule slot
+  for (int i = 0; i < scheduleSlotCount; i++) {
+    if (!schedule[i].enabled) continue;
+    
+    // Check if today is in the schedule
+    if (schedule[i].days.indexOf(todayChar) < 0) continue;
+    
+    // Check if this is the scheduled time
+    if (schedule[i].hour == currentHour && schedule[i].minute == currentMinute) {
+      if (targetTemp != schedule[i].targetTemp) {
+        targetTemp = schedule[i].targetTemp;
+        integral = 0;
+        preferences.begin("thermostat", false);
+        preferences.putFloat("target", targetTemp);
+        preferences.end();
+        
+        addLog("Schedule: Temp set to " + String(targetTemp, 1) + "°C");
+        publishStatus();
+        displayNeedsUpdate = true;
+      }
+    }
+  }
+  
+  // Calculate next schedule change
+  int nextHour = 99;
+  int nextMinute = 99;
+  float nextTemp = 0;
+  
+  for (int i = 0; i < scheduleSlotCount; i++) {
+    if (!schedule[i].enabled) continue;
+    if (schedule[i].days.indexOf(todayChar) < 0) continue;
+    
+    int schedMinutes = schedule[i].hour * 60 + schedule[i].minute;
+    int currentMinutes = currentHour * 60 + currentMinute;
+    
+    if (schedMinutes > currentMinutes) {
+      int testMinutes = schedule[i].hour * 60 + schedule[i].minute;
+      if (testMinutes < (nextHour * 60 + nextMinute)) {
+        nextHour = schedule[i].hour;
+        nextMinute = schedule[i].minute;
+        nextTemp = schedule[i].targetTemp;
+      }
+    }
+  }
+  
+  if (nextHour < 99) {
+    char buffer[20];
+    sprintf(buffer, "%02d:%02d", nextHour, nextMinute);
+    nextScheduleTime = String(buffer);
+    nextScheduleTemp = nextTemp;
+  } else {
+    nextScheduleTime = "";
+  }
+}
+
+void logTemperature() {
+  tempHistory[tempHistoryIndex] = currentTemp;
+  tempHistoryIndex = (tempHistoryIndex + 1) % TEMP_HISTORY_SIZE;
+}
+
+void handleSchedule() {
+  String html = getHTMLHeader("Schedule", "schedule");
+  
+  // Schedule enable/disable
+  html += "<div style='margin:20px 0;display:flex;justify-content:space-between;align-items:center'>";
+  html += "<h2 style='margin:0'>Temperature Schedule</h2>";
+  html += "<label style='display:flex;align-items:center;gap:10px'>";
+  html += "<span>Schedule " + String(scheduleEnabled ? "Enabled" : "Disabled") + "</span>";
+  html += "<input type='checkbox' id='schedule-enabled' " + String(scheduleEnabled ? "checked" : "") + " ";
+  html += "onchange='toggleSchedule()' style='width:auto;height:20px'>";
+  html += "</label></div>";
+  
+  if (scheduleEnabled && nextScheduleTime.length() > 0) {
+    html += "<div class='info-box'>📅 Next: " + String(nextScheduleTemp, 1) + "°C at " + nextScheduleTime + "</div>";
+  }
+  
+  html += "<form id='schedule-form'>";
+  
+  // Schedule slots
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    if (i >= scheduleSlotCount && i > 3) continue; // Show empty slots up to 4, then only if used
+    
+    bool isActive = (i < scheduleSlotCount) && schedule[i].enabled;
+    
+    html += "<div class='schedule-slot' style='border:2px solid " + String(isActive ? "#4CAF50" : "#ddd") + ";";
+    html += "padding:15px;border-radius:10px;margin:15px 0;background:" + String(isActive ? "#f1f8f4" : "#f9f9f9") + "'>";
+    
+    html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>";
+    html += "<strong>Slot " + String(i + 1) + "</strong>";
+    html += "<label style='display:flex;align-items:center;gap:5px'>";
+    html += "<input type='checkbox' name='enabled" + String(i) + "' " + String(isActive ? "checked" : "") + " style='width:auto'>";
+    html += "<span>Active</span></label></div>";
+    
+    // Time
+    html += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0'>";
+    html += "<div><label>Hour</label><input type='number' name='hour" + String(i) + "' value='" + String(schedule[i].hour) + "' min='0' max='23'></div>";
+    html += "<div><label>Minute</label><input type='number' name='minute" + String(i) + "' value='" + String(schedule[i].minute) + "' min='0' max='59'></div>";
+    html += "<div><label>Temp (°C)</label><input type='number' name='temp" + String(i) + "' value='" + String(schedule[i].targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
+    html += "</div>";
+    
+    // Days
+    html += "<div><label>Active Days:</label>";
+    html += "<div style='display:flex;gap:5px;margin-top:5px'>";
+    String days = "SMTWTFS";
+    String dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    for (int d = 0; d < 7; d++) {
+      bool checked = schedule[i].days.indexOf(days[d]) >= 0;
+      html += "<label style='flex:1;text-align:center;padding:8px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
+      html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer'>";
+      html += "<input type='checkbox' name='day" + String(i) + "_" + String(d) + "' " + String(checked ? "checked" : "") + " ";
+      html += "style='display:none' onchange='this.parentElement.style.background=this.checked?\"#4CAF50\":\"#ddd\";";
+      html += "this.parentElement.style.color=this.checked?\"white\":\"#666\"'>";
+      html += dayNames[d] + "</label>";
+    }
+    html += "</div></div>";
+    
+    html += "</div>"; // End slot
+  }
+  
+  // Add/Remove buttons
+  html += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:20px 0'>";
+  if (scheduleSlotCount < MAX_SCHEDULE_SLOTS) {
+    html += "<button type='button' onclick='addSlot()' class='btn-secondary'>➕ Add Slot</button>";
+  } else {
+    html += "<div></div>";
+  }
+  if (scheduleSlotCount > 1) {
+    html += "<button type='button' onclick='removeSlot()' class='btn-danger'>➖ Remove Last</button>";
+  }
+  html += "</div>";
+  
+  html += "<button type='button' onclick='saveSchedule()'>Save Schedule</button>";
+  html += "</form>";
+  
+  html += "<script>";
+  html += "let slotCount=" + String(scheduleSlotCount) + ";";
+  html += "function toggleSchedule(){";
+  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},";
+  html += "body:'schedule_enabled='+document.getElementById('schedule-enabled').checked}).then(()=>location.reload());}";
+  html += "function addSlot(){if(slotCount<" + String(MAX_SCHEDULE_SLOTS) + "){slotCount++;location.reload();}}";
+  html += "function removeSlot(){if(slotCount>1){slotCount--;location.reload();}}";
+  html += "function saveSchedule(){";
+  html += "let form=document.getElementById('schedule-form');";
+  html += "let data='slot_count='+slotCount;";
+  html += "for(let i=0;i<" + String(MAX_SCHEDULE_SLOTS) + ";i++){";
+  html += "data+='&enabled'+i+'='+(form['enabled'+i]?.checked||false);";
+  html += "data+='&hour'+i+'='+(form['hour'+i]?.value||0);";
+  html += "data+='&minute'+i+'='+(form['minute'+i]?.value||0);";
+  html += "data+='&temp'+i+'='+(form['temp'+i]?.value||28);";
+  html += "let days='';";
+  html += "for(let d=0;d<7;d++){if(form['day'+i+'_'+d]?.checked)days+='SMTWTFS'[d];}";
+  html += "data+='&days'+i+'='+days;}";
+  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:data})";
+  html += ".then(()=>{alert('Schedule saved!');location.reload();});}";
+  html += "</script>";
+  
+  html += getHTMLFooter();
+  server.send(200, "text/html", html);
+}
+
+void handleSaveSchedule() {
+  // Toggle schedule enabled
+  if (server.hasArg("schedule_enabled")) {
+    scheduleEnabled = (server.arg("schedule_enabled") == "true");
+    preferences.begin("thermostat", false);
+    preferences.putBool("sched_enabled", scheduleEnabled);
+    preferences.end();
+    server.send(200, "text/plain", "OK");
+    return;
+  }
+  
+  // Save full schedule
+  if (server.hasArg("slot_count")) {
+    scheduleSlotCount = server.arg("slot_count").toInt();
+    
+    for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+      schedule[i].enabled = server.hasArg("enabled" + String(i)) && (server.arg("enabled" + String(i)) == "true");
+      schedule[i].hour = server.arg("hour" + String(i)).toInt();
+      schedule[i].minute = server.arg("minute" + String(i)).toInt();
+      schedule[i].targetTemp = server.arg("temp" + String(i)).toFloat();
+      schedule[i].days = server.arg("days" + String(i));
+      if (schedule[i].days.length() == 0) schedule[i].days = "SMTWTFS"; // Default to all days
+    }
+    
+    saveSchedule();
+  }
+  
+  server.send(200, "text/plain", "OK");
+}
+
+void handleTempHistory() {
+  String json = "{\"history\":[";
+  
+  // Send data starting from oldest
+  for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
+    int idx = (tempHistoryIndex + i) % TEMP_HISTORY_SIZE;
+    if (tempHistory[idx] != 0.0) {
+      if (i > 0) json += ",";
+      json += String(tempHistory[idx], 1);
+    }
+  }
+  
+  json += "]}";
+  server.send(200, "application/json", json);
 }
