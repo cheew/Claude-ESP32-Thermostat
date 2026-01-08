@@ -1,6 +1,6 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 1.3.1
+ * Version: 1.3.2
  * Last Updated: January 7, 2026
  * 
  * Features:
@@ -15,6 +15,11 @@
  * - OTA firmware updates (manual + GitHub auto-update)
  * - System logging with 20-entry circular buffer
  * - Mobile-responsive web interface
+ * 
+ * Changelog v1.3.2:
+ * - Fixed mDNS hostname bug (removed extra hyphen)
+ * - Added hostname sanitization (removes invalid characters)
+ * - Added trim() to remove trailing spaces from device name
  * 
  * Changelog v1.3.1:
  * - Added temperature scheduling system (up to 8 time slots)
@@ -59,7 +64,7 @@
 #define ZEROCROSS_PIN 27  // GPIO27 - Zero-cross detection pin (was 18, moved for TFT)
 
 // Firmware version
-#define FIRMWARE_VERSION "1.3.1"
+#define FIRMWARE_VERSION "1.3.2"
 
 // GitHub repository for auto-updates
 const char* github_user = "cheew";
@@ -379,8 +384,19 @@ void setupMDNS() {
   
   // Create hostname from device name (replace spaces with hyphens, lowercase)
   String hostname = deviceName;
+  hostname.trim();  // Remove any leading/trailing whitespace
   hostname.replace(" ", "-");
   hostname.toLowerCase();
+  
+  // Remove any non-alphanumeric characters except hyphens
+  String cleanHostname = "";
+  for (int i = 0; i < hostname.length(); i++) {
+    char c = hostname.charAt(i);
+    if (isalnum(c) || c == '-') {
+      cleanHostname += c;
+    }
+  }
+  hostname = cleanHostname;
   
   // Start mDNS
   if (MDNS.begin(hostname.c_str())) {
