@@ -1,14 +1,13 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 1.3.0
+ * Version: 1.3.1
  * Last Updated: January 7, 2026
  * 
  * Features:
  * - PID temperature control with AC dimmer
  * - 2.8" TFT touchscreen display (ILI9341)
  * - Web interface with Info, Logs, Schedule, and Settings pages
- * - Temperature scheduling (up to 8 time slots)
- * - Temperature history logging (24 hours, 1-minute intervals)
+ * - Temperature scheduling (up to 8 time slots, day-specific)
  * - MQTT integration + Home Assistant auto-discovery
  * - AP mode for easy setup
  * - Three display screens: Main, Settings, Simple View
@@ -17,13 +16,13 @@
  * - System logging with 20-entry circular buffer
  * - Mobile-responsive web interface
  * 
- * Changelog v1.3.0:
- * - Added temperature scheduling system (up to 8 time slots, day-specific)
- * - Added temperature history logging (1440 data points, 1-minute intervals)
+ * Changelog v1.3.1:
+ * - Added temperature scheduling system (up to 8 time slots)
  * - NTP time synchronization for accurate scheduling
- * - Schedule page with visual editor
+ * - Schedule page with visual editor and day selection
  * - Next scheduled change indicator
- * - API endpoint for temperature history (/api/temp-history)
+ * - Memory optimized (no temp history for now)
+ * - Fixed WiFi connection issues from v1.3.0
  * 
  * Changelog v1.2.0:
  * - Enhanced web interface with Info and Logs pages
@@ -60,7 +59,7 @@
 #define ZEROCROSS_PIN 27  // GPIO27 - Zero-cross detection pin (was 18, moved for TFT)
 
 // Firmware version
-#define FIRMWARE_VERSION "1.3.0"
+#define FIRMWARE_VERSION "1.3.1"
 
 // GitHub repository for auto-updates
 const char* github_user = "cheew";
@@ -122,13 +121,10 @@ void handleInfo();
 void handleLogs();
 void handleSchedule();
 void handleSaveSchedule();
-void handleTempHistory();
 void addLog(String message);
-void logTemperature();
 void checkSchedule();
 void loadSchedule();
 void saveSchedule();
-int getCurrentDayOfWeek();
 String getHTMLHeader(String title, String activePage);
 String getHTMLFooter();
 void initDisplay();
@@ -187,13 +183,6 @@ String logMessages[MAX_LOGS];
 int logIndex = 0;
 unsigned long bootTime = 0;
 
-// Temperature history for graphing (1 minute intervals, 24 hours = 1440 points)
-#define TEMP_HISTORY_SIZE 1440
-float tempHistory[TEMP_HISTORY_SIZE];
-int tempHistoryIndex = 0;
-unsigned long lastTempLog = 0;
-const unsigned long tempLogInterval = 60000; // 1 minute
-
 // Schedule system
 #define MAX_SCHEDULE_SLOTS 8
 struct ScheduleSlot {
@@ -246,16 +235,13 @@ void setup() {
   Kp = preferences.getFloat("Kp", 10.0);
   Ki = preferences.getFloat("Ki", 0.5);
   Kd = preferences.getFloat("Kd", 5.0);
+  preferences.end();
   
-  // Initialize temperature history
-  for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
-    tempHistory[i] = 0.0;
-  }
-  
-  // Load schedule
+  // Load schedule (after preferences closed)
   loadSchedule();
   
   // Check if we have WiFi credentials saved
+  preferences.begin("thermostat", true);
   String savedSSID = preferences.getString("wifi_ssid", "");
   if (savedSSID.length() == 0) {
     // No saved WiFi, start in AP mode
@@ -273,8 +259,8 @@ void setup() {
   // Setup time (NTP) if connected to WiFi
   if (WiFi.status() == WL_CONNECTED && !apMode) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    Serial.println("Syncing time with NTP...");
-    addLog("Syncing time with NTP");
+    Serial.println("Time sync started");
+    addLog("Time sync started");
   }
   
   // Setup MQTT (only if connected to WiFi)
@@ -341,15 +327,11 @@ void loop() {
   // Check for touch input
   checkTouch();
   
-  // Log temperature to history (every minute)
-  if (millis() - lastTempLog >= tempLogInterval) {
-    logTemperature();
-    lastTempLog = millis();
-  }
-  
   // Check schedule (every minute)
-  if (scheduleEnabled && millis() - lastTempLog < 1000) {  // Check when we log temp
+  static unsigned long lastScheduleCheck = 0;
+  if (scheduleEnabled && millis() - lastScheduleCheck >= 60000) {  // Check every minute
     checkSchedule();
+    lastScheduleCheck = millis();
   }
   
   // Publish to MQTT periodically (only if not in AP mode)
@@ -655,7 +637,6 @@ void setupWebServer() {
   server.on("/logs", handleLogs);
   server.on("/schedule", handleSchedule);
   server.on("/api/save-schedule", HTTP_POST, handleSaveSchedule);
-  server.on("/api/temp-history", handleTempHistory);
   server.begin();
   Serial.println("Web server started");
   addLog("Web server started");
@@ -1697,6 +1678,247 @@ void drawSettingsScreen() {
   tft.print(FIRMWARE_VERSION);
 }
 
+// ===== SCHEDULE SYSTEM =====
+
+void loadSchedule() {
+  preferences.begin("thermostat", true);
+  scheduleEnabled = preferences.getBool("sched_enabled", false);
+  scheduleSlotCount = preferences.getInt("sched_count", 0);
+  
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    String prefix = "s" + String(i) + "_";
+    schedule[i].enabled = preferences.getBool((prefix + "en").c_str(), false);
+    schedule[i].hour = preferences.getInt((prefix + "h").c_str(), 0);
+    schedule[i].minute = preferences.getInt((prefix + "m").c_str(), 0);
+    schedule[i].targetTemp = preferences.getFloat((prefix + "t").c_str(), 28.0);
+    schedule[i].days = preferences.getString((prefix + "d").c_str(), "SMTWTFS");
+  }
+  preferences.end();
+  
+  if (scheduleSlotCount == 0) {
+    // Initialize default schedule (2 slots)
+    scheduleSlotCount = 2;
+    schedule[0] = {true, 7, 0, 28.0, "SMTWTFS"};  // 7:00 AM - 28°C
+    schedule[1] = {true, 22, 0, 24.0, "SMTWTFS"}; // 10:00 PM - 24°C
+  }
+}
+
+void saveSchedule() {
+  preferences.begin("thermostat", false);
+  preferences.putBool("sched_enabled", scheduleEnabled);
+  preferences.putInt("sched_count", scheduleSlotCount);
+  
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    String prefix = "s" + String(i) + "_";
+    preferences.putBool((prefix + "en").c_str(), schedule[i].enabled);
+    preferences.putInt((prefix + "h").c_str(), schedule[i].hour);
+    preferences.putInt((prefix + "m").c_str(), schedule[i].minute);
+    preferences.putFloat((prefix + "t").c_str(), schedule[i].targetTemp);
+    preferences.putString((prefix + "d").c_str(), schedule[i].days);
+  }
+  preferences.end();
+  
+  addLog("Schedule saved");
+}
+
+void checkSchedule() {
+  if (!scheduleEnabled) return;
+  
+  // Get current time
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  int currentHour = timeinfo->tm_hour;
+  int currentMinute = timeinfo->tm_min;
+  int currentDay = timeinfo->tm_wday; // 0=Sunday
+  
+  String dayChar = "SMTWTFS";
+  char todayChar = dayChar[currentDay];
+  
+  // Check each schedule slot
+  for (int i = 0; i < scheduleSlotCount; i++) {
+    if (!schedule[i].enabled) continue;
+    
+    // Check if today is in the schedule
+    if (schedule[i].days.indexOf(todayChar) < 0) continue;
+    
+    // Check if this is the scheduled time
+    if (schedule[i].hour == currentHour && schedule[i].minute == currentMinute) {
+      if (targetTemp != schedule[i].targetTemp) {
+        targetTemp = schedule[i].targetTemp;
+        integral = 0;
+        preferences.begin("thermostat", false);
+        preferences.putFloat("target", targetTemp);
+        preferences.end();
+        
+        addLog("Schedule: Temp set to " + String(targetTemp, 1) + "°C");
+        publishStatus();
+        displayNeedsUpdate = true;
+      }
+    }
+  }
+  
+  // Calculate next schedule change
+  int nextHour = 99;
+  int nextMinute = 99;
+  float nextTemp = 0;
+  
+  for (int i = 0; i < scheduleSlotCount; i++) {
+    if (!schedule[i].enabled) continue;
+    if (schedule[i].days.indexOf(todayChar) < 0) continue;
+    
+    int schedMinutes = schedule[i].hour * 60 + schedule[i].minute;
+    int currentMinutes = currentHour * 60 + currentMinute;
+    
+    if (schedMinutes > currentMinutes) {
+      int testMinutes = schedule[i].hour * 60 + schedule[i].minute;
+      if (testMinutes < (nextHour * 60 + nextMinute)) {
+        nextHour = schedule[i].hour;
+        nextMinute = schedule[i].minute;
+        nextTemp = schedule[i].targetTemp;
+      }
+    }
+  }
+  
+  if (nextHour < 99) {
+    char buffer[20];
+    sprintf(buffer, "%02d:%02d", nextHour, nextMinute);
+    nextScheduleTime = String(buffer);
+    nextScheduleTemp = nextTemp;
+  } else {
+    nextScheduleTime = "";
+  }
+}
+
+void handleSchedule() {
+  String html = getHTMLHeader("Schedule", "schedule");
+  
+  // Schedule enable/disable
+  html += "<div style='margin:20px 0;display:flex;justify-content:space-between;align-items:center'>";
+  html += "<h2 style='margin:0'>Temperature Schedule</h2>";
+  html += "<label style='display:flex;align-items:center;gap:10px'>";
+  html += "<span>Schedule " + String(scheduleEnabled ? "Enabled" : "Disabled") + "</span>";
+  html += "<input type='checkbox' id='schedule-enabled' " + String(scheduleEnabled ? "checked" : "") + " ";
+  html += "onchange='toggleSchedule()' style='width:auto;height:20px'>";
+  html += "</label></div>";
+  
+  if (scheduleEnabled && nextScheduleTime.length() > 0) {
+    html += "<div class='info-box'>📅 Next: " + String(nextScheduleTemp, 1) + "°C at " + nextScheduleTime + "</div>";
+  }
+  
+  html += "<form id='schedule-form'>";
+  
+  // Schedule slots
+  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+    if (i >= scheduleSlotCount && i > 3) continue; // Show empty slots up to 4, then only if used
+    
+    bool isActive = (i < scheduleSlotCount) && schedule[i].enabled;
+    
+    html += "<div class='schedule-slot' style='border:2px solid " + String(isActive ? "#4CAF50" : "#ddd") + ";";
+    html += "padding:15px;border-radius:10px;margin:15px 0;background:" + String(isActive ? "#f1f8f4" : "#f9f9f9") + "'>";
+    
+    html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>";
+    html += "<strong>Slot " + String(i + 1) + "</strong>";
+    html += "<label style='display:flex;align-items:center;gap:5px'>";
+    html += "<input type='checkbox' name='enabled" + String(i) + "' " + String(isActive ? "checked" : "") + " style='width:auto'>";
+    html += "<span>Active</span></label></div>";
+    
+    // Time
+    html += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0'>";
+    html += "<div><label>Hour</label><input type='number' name='hour" + String(i) + "' value='" + String(schedule[i].hour) + "' min='0' max='23'></div>";
+    html += "<div><label>Minute</label><input type='number' name='minute" + String(i) + "' value='" + String(schedule[i].minute) + "' min='0' max='59'></div>";
+    html += "<div><label>Temp (°C)</label><input type='number' name='temp" + String(i) + "' value='" + String(schedule[i].targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
+    html += "</div>";
+    
+    // Days
+    html += "<div><label>Active Days:</label>";
+    html += "<div style='display:flex;gap:5px;margin-top:5px'>";
+    String days = "SMTWTFS";
+    String dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    for (int d = 0; d < 7; d++) {
+      bool checked = schedule[i].days.indexOf(days[d]) >= 0;
+      html += "<label style='flex:1;text-align:center;padding:8px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
+      html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer'>";
+      html += "<input type='checkbox' name='day" + String(i) + "_" + String(d) + "' " + String(checked ? "checked" : "") + " ";
+      html += "style='display:none' onchange='this.parentElement.style.background=this.checked?\"#4CAF50\":\"#ddd\";";
+      html += "this.parentElement.style.color=this.checked?\"white\":\"#666\"'>";
+      html += dayNames[d] + "</label>";
+    }
+    html += "</div></div>";
+    
+    html += "</div>"; // End slot
+  }
+  
+  // Add/Remove buttons
+  html += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:20px 0'>";
+  if (scheduleSlotCount < MAX_SCHEDULE_SLOTS) {
+    html += "<button type='button' onclick='addSlot()' class='btn-secondary'>➕ Add Slot</button>";
+  } else {
+    html += "<div></div>";
+  }
+  if (scheduleSlotCount > 1) {
+    html += "<button type='button' onclick='removeSlot()' class='btn-danger'>➖ Remove Last</button>";
+  }
+  html += "</div>";
+  
+  html += "<button type='button' onclick='saveSchedule()'>Save Schedule</button>";
+  html += "</form>";
+  
+  html += "<script>";
+  html += "let slotCount=" + String(scheduleSlotCount) + ";";
+  html += "function toggleSchedule(){";
+  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},";
+  html += "body:'schedule_enabled='+document.getElementById('schedule-enabled').checked}).then(()=>location.reload());}";
+  html += "function addSlot(){if(slotCount<" + String(MAX_SCHEDULE_SLOTS) + "){slotCount++;location.reload();}}";
+  html += "function removeSlot(){if(slotCount>1){slotCount--;location.reload();}}";
+  html += "function saveSchedule(){";
+  html += "let form=document.getElementById('schedule-form');";
+  html += "let data='slot_count='+slotCount;";
+  html += "for(let i=0;i<" + String(MAX_SCHEDULE_SLOTS) + ";i++){";
+  html += "data+='&enabled'+i+'='+(form['enabled'+i]?.checked||false);";
+  html += "data+='&hour'+i+'='+(form['hour'+i]?.value||0);";
+  html += "data+='&minute'+i+'='+(form['minute'+i]?.value||0);";
+  html += "data+='&temp'+i+'='+(form['temp'+i]?.value||28);";
+  html += "let days='';";
+  html += "for(let d=0;d<7;d++){if(form['day'+i+'_'+d]?.checked)days+='SMTWTFS'[d];}";
+  html += "data+='&days'+i+'='+days;}";
+  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:data})";
+  html += ".then(()=>{alert('Schedule saved!');location.reload();});}";
+  html += "</script>";
+  
+  html += getHTMLFooter();
+  server.send(200, "text/html", html);
+}
+
+void handleSaveSchedule() {
+  // Toggle schedule enabled
+  if (server.hasArg("schedule_enabled")) {
+    scheduleEnabled = (server.arg("schedule_enabled") == "true");
+    preferences.begin("thermostat", false);
+    preferences.putBool("sched_enabled", scheduleEnabled);
+    preferences.end();
+    server.send(200, "text/plain", "OK");
+    return;
+  }
+  
+  // Save full schedule
+  if (server.hasArg("slot_count")) {
+    scheduleSlotCount = server.arg("slot_count").toInt();
+    
+    for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+      schedule[i].enabled = server.hasArg("enabled" + String(i)) && (server.arg("enabled" + String(i)) == "true");
+      schedule[i].hour = server.arg("hour" + String(i)).toInt();
+      schedule[i].minute = server.arg("minute" + String(i)).toInt();
+      schedule[i].targetTemp = server.arg("temp" + String(i)).toFloat();
+      schedule[i].days = server.arg("days" + String(i));
+      if (schedule[i].days.length() == 0) schedule[i].days = "SMTWTFS"; // Default to all days
+    }
+    
+    saveSchedule();
+  }
+  
+  server.send(200, "text/plain", "OK");
+}
+
 // ===== LOGGING SYSTEM =====
 
 void addLog(String message) {
@@ -1920,273 +2142,4 @@ void handleLogs() {
   
   html += getHTMLFooter();
   server.send(200, "text/html", html);
-}
-
-// ===== SCHEDULE SYSTEM =====
-
-int getCurrentDayOfWeek() {
-  // Get current time
-  time_t now = time(nullptr);
-  struct tm* timeinfo = localtime(&now);
-  return timeinfo->tm_wday; // 0=Sunday, 1=Monday, ... 6=Saturday
-}
-
-void loadSchedule() {
-  preferences.begin("thermostat", true);
-  scheduleEnabled = preferences.getBool("sched_enabled", false);
-  scheduleSlotCount = preferences.getInt("sched_count", 0);
-  
-  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
-    String prefix = "s" + String(i) + "_";
-    schedule[i].enabled = preferences.getBool((prefix + "en").c_str(), false);
-    schedule[i].hour = preferences.getInt((prefix + "h").c_str(), 0);
-    schedule[i].minute = preferences.getInt((prefix + "m").c_str(), 0);
-    schedule[i].targetTemp = preferences.getFloat((prefix + "t").c_str(), 28.0);
-    schedule[i].days = preferences.getString((prefix + "d").c_str(), "SMTWTFS");
-  }
-  preferences.end();
-  
-  if (scheduleSlotCount == 0) {
-    // Initialize default schedule (2 slots)
-    scheduleSlotCount = 2;
-    schedule[0] = {true, 7, 0, 28.0, "SMTWTFS"};  // 7:00 AM - 28°C
-    schedule[1] = {true, 22, 0, 24.0, "SMTWTFS"}; // 10:00 PM - 24°C
-  }
-}
-
-void saveSchedule() {
-  preferences.begin("thermostat", false);
-  preferences.putBool("sched_enabled", scheduleEnabled);
-  preferences.putInt("sched_count", scheduleSlotCount);
-  
-  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
-    String prefix = "s" + String(i) + "_";
-    preferences.putBool((prefix + "en").c_str(), schedule[i].enabled);
-    preferences.putInt((prefix + "h").c_str(), schedule[i].hour);
-    preferences.putInt((prefix + "m").c_str(), schedule[i].minute);
-    preferences.putFloat((prefix + "t").c_str(), schedule[i].targetTemp);
-    preferences.putString((prefix + "d").c_str(), schedule[i].days);
-  }
-  preferences.end();
-  
-  addLog("Schedule saved");
-}
-
-void checkSchedule() {
-  if (!scheduleEnabled) return;
-  
-  // Get current time
-  time_t now = time(nullptr);
-  struct tm* timeinfo = localtime(&now);
-  int currentHour = timeinfo->tm_hour;
-  int currentMinute = timeinfo->tm_min;  // Fixed: tm_min not tm_minute
-  int currentDay = timeinfo->tm_wday; // 0=Sunday
-  
-  String dayChar = "SMTWTFS";
-  char todayChar = dayChar[currentDay];
-  
-  // Check each schedule slot
-  for (int i = 0; i < scheduleSlotCount; i++) {
-    if (!schedule[i].enabled) continue;
-    
-    // Check if today is in the schedule
-    if (schedule[i].days.indexOf(todayChar) < 0) continue;
-    
-    // Check if this is the scheduled time
-    if (schedule[i].hour == currentHour && schedule[i].minute == currentMinute) {
-      if (targetTemp != schedule[i].targetTemp) {
-        targetTemp = schedule[i].targetTemp;
-        integral = 0;
-        preferences.begin("thermostat", false);
-        preferences.putFloat("target", targetTemp);
-        preferences.end();
-        
-        addLog("Schedule: Temp set to " + String(targetTemp, 1) + "°C");
-        publishStatus();
-        displayNeedsUpdate = true;
-      }
-    }
-  }
-  
-  // Calculate next schedule change
-  int nextHour = 99;
-  int nextMinute = 99;
-  float nextTemp = 0;
-  
-  for (int i = 0; i < scheduleSlotCount; i++) {
-    if (!schedule[i].enabled) continue;
-    if (schedule[i].days.indexOf(todayChar) < 0) continue;
-    
-    int schedMinutes = schedule[i].hour * 60 + schedule[i].minute;
-    int currentMinutes = currentHour * 60 + currentMinute;
-    
-    if (schedMinutes > currentMinutes) {
-      int testMinutes = schedule[i].hour * 60 + schedule[i].minute;
-      if (testMinutes < (nextHour * 60 + nextMinute)) {
-        nextHour = schedule[i].hour;
-        nextMinute = schedule[i].minute;
-        nextTemp = schedule[i].targetTemp;
-      }
-    }
-  }
-  
-  if (nextHour < 99) {
-    char buffer[20];
-    sprintf(buffer, "%02d:%02d", nextHour, nextMinute);
-    nextScheduleTime = String(buffer);
-    nextScheduleTemp = nextTemp;
-  } else {
-    nextScheduleTime = "";
-  }
-}
-
-void logTemperature() {
-  tempHistory[tempHistoryIndex] = currentTemp;
-  tempHistoryIndex = (tempHistoryIndex + 1) % TEMP_HISTORY_SIZE;
-}
-
-void handleSchedule() {
-  String html = getHTMLHeader("Schedule", "schedule");
-  
-  // Schedule enable/disable
-  html += "<div style='margin:20px 0;display:flex;justify-content:space-between;align-items:center'>";
-  html += "<h2 style='margin:0'>Temperature Schedule</h2>";
-  html += "<label style='display:flex;align-items:center;gap:10px'>";
-  html += "<span>Schedule " + String(scheduleEnabled ? "Enabled" : "Disabled") + "</span>";
-  html += "<input type='checkbox' id='schedule-enabled' " + String(scheduleEnabled ? "checked" : "") + " ";
-  html += "onchange='toggleSchedule()' style='width:auto;height:20px'>";
-  html += "</label></div>";
-  
-  if (scheduleEnabled && nextScheduleTime.length() > 0) {
-    html += "<div class='info-box'>📅 Next: " + String(nextScheduleTemp, 1) + "°C at " + nextScheduleTime + "</div>";
-  }
-  
-  html += "<form id='schedule-form'>";
-  
-  // Schedule slots
-  for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
-    if (i >= scheduleSlotCount && i > 3) continue; // Show empty slots up to 4, then only if used
-    
-    bool isActive = (i < scheduleSlotCount) && schedule[i].enabled;
-    
-    html += "<div class='schedule-slot' style='border:2px solid " + String(isActive ? "#4CAF50" : "#ddd") + ";";
-    html += "padding:15px;border-radius:10px;margin:15px 0;background:" + String(isActive ? "#f1f8f4" : "#f9f9f9") + "'>";
-    
-    html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>";
-    html += "<strong>Slot " + String(i + 1) + "</strong>";
-    html += "<label style='display:flex;align-items:center;gap:5px'>";
-    html += "<input type='checkbox' name='enabled" + String(i) + "' " + String(isActive ? "checked" : "") + " style='width:auto'>";
-    html += "<span>Active</span></label></div>";
-    
-    // Time
-    html += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0'>";
-    html += "<div><label>Hour</label><input type='number' name='hour" + String(i) + "' value='" + String(schedule[i].hour) + "' min='0' max='23'></div>";
-    html += "<div><label>Minute</label><input type='number' name='minute" + String(i) + "' value='" + String(schedule[i].minute) + "' min='0' max='59'></div>";
-    html += "<div><label>Temp (°C)</label><input type='number' name='temp" + String(i) + "' value='" + String(schedule[i].targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
-    html += "</div>";
-    
-    // Days
-    html += "<div><label>Active Days:</label>";
-    html += "<div style='display:flex;gap:5px;margin-top:5px'>";
-    String days = "SMTWTFS";
-    String dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    for (int d = 0; d < 7; d++) {
-      bool checked = schedule[i].days.indexOf(days[d]) >= 0;
-      html += "<label style='flex:1;text-align:center;padding:8px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
-      html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer'>";
-      html += "<input type='checkbox' name='day" + String(i) + "_" + String(d) + "' " + String(checked ? "checked" : "") + " ";
-      html += "style='display:none' onchange='this.parentElement.style.background=this.checked?\"#4CAF50\":\"#ddd\";";
-      html += "this.parentElement.style.color=this.checked?\"white\":\"#666\"'>";
-      html += dayNames[d] + "</label>";
-    }
-    html += "</div></div>";
-    
-    html += "</div>"; // End slot
-  }
-  
-  // Add/Remove buttons
-  html += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:20px 0'>";
-  if (scheduleSlotCount < MAX_SCHEDULE_SLOTS) {
-    html += "<button type='button' onclick='addSlot()' class='btn-secondary'>➕ Add Slot</button>";
-  } else {
-    html += "<div></div>";
-  }
-  if (scheduleSlotCount > 1) {
-    html += "<button type='button' onclick='removeSlot()' class='btn-danger'>➖ Remove Last</button>";
-  }
-  html += "</div>";
-  
-  html += "<button type='button' onclick='saveSchedule()'>Save Schedule</button>";
-  html += "</form>";
-  
-  html += "<script>";
-  html += "let slotCount=" + String(scheduleSlotCount) + ";";
-  html += "function toggleSchedule(){";
-  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},";
-  html += "body:'schedule_enabled='+document.getElementById('schedule-enabled').checked}).then(()=>location.reload());}";
-  html += "function addSlot(){if(slotCount<" + String(MAX_SCHEDULE_SLOTS) + "){slotCount++;location.reload();}}";
-  html += "function removeSlot(){if(slotCount>1){slotCount--;location.reload();}}";
-  html += "function saveSchedule(){";
-  html += "let form=document.getElementById('schedule-form');";
-  html += "let data='slot_count='+slotCount;";
-  html += "for(let i=0;i<" + String(MAX_SCHEDULE_SLOTS) + ";i++){";
-  html += "data+='&enabled'+i+'='+(form['enabled'+i]?.checked||false);";
-  html += "data+='&hour'+i+'='+(form['hour'+i]?.value||0);";
-  html += "data+='&minute'+i+'='+(form['minute'+i]?.value||0);";
-  html += "data+='&temp'+i+'='+(form['temp'+i]?.value||28);";
-  html += "let days='';";
-  html += "for(let d=0;d<7;d++){if(form['day'+i+'_'+d]?.checked)days+='SMTWTFS'[d];}";
-  html += "data+='&days'+i+'='+days;}";
-  html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:data})";
-  html += ".then(()=>{alert('Schedule saved!');location.reload();});}";
-  html += "</script>";
-  
-  html += getHTMLFooter();
-  server.send(200, "text/html", html);
-}
-
-void handleSaveSchedule() {
-  // Toggle schedule enabled
-  if (server.hasArg("schedule_enabled")) {
-    scheduleEnabled = (server.arg("schedule_enabled") == "true");
-    preferences.begin("thermostat", false);
-    preferences.putBool("sched_enabled", scheduleEnabled);
-    preferences.end();
-    server.send(200, "text/plain", "OK");
-    return;
-  }
-  
-  // Save full schedule
-  if (server.hasArg("slot_count")) {
-    scheduleSlotCount = server.arg("slot_count").toInt();
-    
-    for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
-      schedule[i].enabled = server.hasArg("enabled" + String(i)) && (server.arg("enabled" + String(i)) == "true");
-      schedule[i].hour = server.arg("hour" + String(i)).toInt();
-      schedule[i].minute = server.arg("minute" + String(i)).toInt();
-      schedule[i].targetTemp = server.arg("temp" + String(i)).toFloat();
-      schedule[i].days = server.arg("days" + String(i));
-      if (schedule[i].days.length() == 0) schedule[i].days = "SMTWTFS"; // Default to all days
-    }
-    
-    saveSchedule();
-  }
-  
-  server.send(200, "text/plain", "OK");
-}
-
-void handleTempHistory() {
-  String json = "{\"history\":[";
-  
-  // Send data starting from oldest
-  for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
-    int idx = (tempHistoryIndex + i) % TEMP_HISTORY_SIZE;
-    if (tempHistory[idx] != 0.0) {
-      if (i > 0) json += ",";
-      json += String(tempHistory[idx], 1);
-    }
-  }
-  
-  json += "]}";
-  server.send(200, "application/json", json);
 }
