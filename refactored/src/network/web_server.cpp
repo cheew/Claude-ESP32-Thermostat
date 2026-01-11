@@ -57,8 +57,11 @@ static void handleInfo(void);
 static void handleLogs(void);
 static void handleSettings(void);
 static void handleStatus(void);
+static void handleInfo_API(void);
+static void handleLogs_API(void);
 static void handleHistory(void);
 static void handleSet(void);
+static void handleControl(void);
 static void handleSaveSettings(void);
 static void handleSaveSchedule(void);
 static void handleRestart(void);
@@ -88,8 +91,11 @@ void webserver_init(void) {
     
     // API endpoints
     server.on("/api/status", handleStatus);
+    server.on("/api/info", handleInfo_API);
+    server.on("/api/logs", handleLogs_API);
     server.on("/api/history", handleHistory);
     server.on("/api/set", HTTP_POST, handleSet);
+    server.on("/api/control", HTTP_POST, handleControl);
     server.on("/api/save-settings", HTTP_POST, handleSaveSettings);
     server.on("/api/save-schedule", HTTP_POST, handleSaveSchedule);
     server.on("/api/restart", HTTP_POST, handleRestart);
@@ -253,6 +259,65 @@ static void handleStatus(void) {
 }
 
 /**
+ * Handle /api/info
+ */
+static void handleInfo_API(void) {
+    StaticJsonDocument<512> doc;
+
+    // Device info
+    doc["name"] = deviceName;
+    doc["version"] = firmwareVersion;
+    doc["mac"] = WiFi.macAddress();
+    doc["ip"] = WiFi.localIP().toString();
+
+    // Network info
+    doc["wifi_connected"] = networkConnected;
+    doc["wifi_ssid"] = networkSSID;
+    doc["wifi_rssi"] = WiFi.RSSI();
+    doc["ap_mode"] = networkAPMode;
+
+    // System info
+    unsigned long uptimeSeconds = millis() / 1000;
+    doc["uptime_seconds"] = uptimeSeconds;
+    doc["uptime_days"] = uptimeSeconds / 86400;
+    doc["uptime_hours"] = (uptimeSeconds % 86400) / 3600;
+    doc["uptime_minutes"] = (uptimeSeconds % 3600) / 60;
+
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["heap_size"] = ESP.getHeapSize();
+
+    // MQTT status - would need to be passed from mqtt_manager
+    // For now, just indicate if we have network
+    doc["mqtt_configured"] = networkConnected && !networkAPMode;
+
+    String output;
+    serializeJson(doc, output);
+    server.send(200, "application/json", output);
+}
+
+/**
+ * Handle /api/logs
+ */
+static void handleLogs_API(void) {
+    DynamicJsonDocument doc(2048);
+    JsonArray logs = doc.createNestedArray("logs");
+
+    int logCount = logger_get_count();
+    for (int i = 0; i < logCount; i++) {
+        const char* logEntry = logger_get_entry(i);
+        if (logEntry != nullptr) {
+            logs.add(logEntry);
+        }
+    }
+
+    doc["count"] = logCount;
+
+    String output;
+    serializeJson(doc, output);
+    server.send(200, "application/json", output);
+}
+
+/**
  * Handle /api/history
  */
 static void handleHistory(void) {
@@ -303,6 +368,69 @@ static void handleSet(void) {
     
     server.sendHeader("Location", "/");
     server.send(303);
+}
+
+/**
+ * Handle /api/control - Unified control endpoint with JSON
+ */
+static void handleControl(void) {
+    // Parse JSON body
+    if (!server.hasArg("plain")) {
+        StaticJsonDocument<128> errorDoc;
+        errorDoc["success"] = false;
+        errorDoc["error"] = "No JSON body provided";
+        String output;
+        serializeJson(errorDoc, output);
+        server.send(400, "application/json", output);
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+    if (error) {
+        StaticJsonDocument<128> errorDoc;
+        errorDoc["success"] = false;
+        errorDoc["error"] = "Invalid JSON";
+        String output;
+        serializeJson(errorDoc, output);
+        server.send(400, "application/json", output);
+        return;
+    }
+
+    // Extract parameters
+    float newTarget = targetTemp;
+    String newMode = String(currentMode);
+    bool changed = false;
+
+    if (doc.containsKey("target")) {
+        newTarget = doc["target"];
+        newTarget = constrain(newTarget, 15.0, 45.0);
+        changed = true;
+    }
+
+    if (doc.containsKey("mode")) {
+        String argMode = doc["mode"].as<String>();
+        if (argMode == "auto" || argMode == "off" || argMode == "on") {
+            newMode = argMode;
+            changed = true;
+        }
+    }
+
+    // Call callback if registered and changes made
+    if (changed && controlCallback != NULL) {
+        controlCallback(newTarget, newMode.c_str());
+    }
+
+    // Return success response
+    StaticJsonDocument<256> responseDoc;
+    responseDoc["success"] = true;
+    responseDoc["target"] = newTarget;
+    responseDoc["mode"] = newMode;
+
+    String output;
+    serializeJson(responseDoc, output);
+    server.send(200, "application/json", output);
 }
 
 /**

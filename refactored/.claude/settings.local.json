@@ -5,7 +5,11 @@
       "Bash(\"C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe\" run)",
       "Bash(\"C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe\" run --target upload)",
       "Bash(timeout 25 \"C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe\" device monitor:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(curl:*)",
+      "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://192.168.1.236/api/info'' | ConvertTo-Json\")"
     ]
   }
 }

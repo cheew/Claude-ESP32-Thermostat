@@ -35,7 +35,7 @@
 #include "temp_history.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "1.6.0"
+#define FIRMWARE_VERSION "1.7.0"
 
 // Timing
 unsigned long lastTempRead = 0;
