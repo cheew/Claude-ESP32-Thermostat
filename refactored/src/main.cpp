@@ -36,7 +36,7 @@
 #include "console.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "1.8.0"
+#define FIRMWARE_VERSION "1.9.0"
 
 // Timing
 unsigned long lastTempRead = 0;

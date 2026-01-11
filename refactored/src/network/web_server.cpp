@@ -1181,11 +1181,16 @@ String webserver_get_html_header(const char* title, const char* activePage) {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<title>" + String(title) + " - " + String(deviceName) + "</title>";
     html += buildCSS();
-    html += "</head><body><div class='container'>";
+    html += "</head><body";
+
+    // Auto-apply dark mode from localStorage or system preference
+    html += " onload=\"if(localStorage.getItem('darkMode')==='true'||((!localStorage.getItem('darkMode'))&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.body.classList.add('dark-mode');}\"";
+
+    html += "><div class='container'>";
     html += "<div class='header'><h1>" + String(deviceName) + "</h1>";
     html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(firmwareVersion) + "</div></div>";
     html += buildNavBar(activePage);
-    
+
     return html;
 }
 
@@ -1242,8 +1247,30 @@ static String buildCSS(void) {
     css += ".stat-label{font-size:12px;color:#666;margin-top:5px}";
     css += ".log-entry{padding:10px;border-bottom:1px solid #eee;font-family:monospace;font-size:14px}";
     css += ".footer{text-align:center;margin-top:30px;padding-top:20px;border-top:1px solid #ddd;color:#666;font-size:12px}";
+
+    // Dark mode overrides
+    css += "body.dark-mode{background:#1a1a1a;color:#e0e0e0}";
+    css += "body.dark-mode .container{background:#2d2d2d;box-shadow:0 2px 10px rgba(0,0,0,0.5)}";
+    css += "body.dark-mode .header{background:linear-gradient(135deg,#2d5f2e,#1e3d1f)}";
+    css += "body.dark-mode h2{color:#b0b0b0}";
+    css += "body.dark-mode input,body.dark-mode select{background:#3d3d3d;color:#e0e0e0;border-color:#4d4d4d}";
+    css += "body.dark-mode .stat-card{background:#3d3d3d}";
+    css += "body.dark-mode .stat-label{color:#b0b0b0}";
+    css += "body.dark-mode .log-entry{border-bottom-color:#4d4d4d}";
+    css += "body.dark-mode .footer{border-top-color:#4d4d4d;color:#b0b0b0}";
+    css += "body.dark-mode .info-box{background:#1a2a3a;color:#e0e0e0}";
+    css += "body.dark-mode .warning-box{background:#3a3020;color:#e0e0e0}";
+    css += "body.dark-mode .nav a{background:#1e4d7a}";
+    css += "body.dark-mode .nav a:hover{background:#163c5f}";
+    css += "body.dark-mode .nav a.active{background:#2d5f2e}";
+    css += ".theme-toggle{position:absolute;right:0;top:0;background:#2196F3;color:white;border:none;padding:12px 15px;border-radius:5px;cursor:pointer;font-size:18px}";
+    css += ".theme-toggle:hover{background:#0b7dda}";
+    css += "body.dark-mode .theme-toggle{background:#1e4d7a}";
+    css += "body.dark-mode .theme-toggle:hover{background:#163c5f}";
+    css += "*{transition:background-color 0.3s,color 0.3s,border-color 0.3s}";
+
     css += "</style>";
-    
+
     return css;
 }
 
@@ -1252,6 +1279,7 @@ static String buildCSS(void) {
  */
 static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
+    nav += "<button class='theme-toggle' onclick='toggleDarkMode()' title='Toggle Dark Mode'>🌓</button>";
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
     nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
     nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
@@ -1260,6 +1288,7 @@ static String buildNavBar(const char* activePage) {
     nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";
     nav += "</div>";
-    
+    nav += "<script>function toggleDarkMode(){document.body.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.body.classList.contains('dark-mode'));}</script>";
+
     return nav;
 }
