@@ -1263,7 +1263,7 @@ static String buildCSS(void) {
     css += "body.dark-mode .nav a{background:#1e4d7a}";
     css += "body.dark-mode .nav a:hover{background:#163c5f}";
     css += "body.dark-mode .nav a.active{background:#2d5f2e}";
-    css += ".theme-toggle{position:absolute;right:0;top:0;background:#2196F3;color:white;border:none;padding:12px 15px;border-radius:5px;cursor:pointer;font-size:18px}";
+    css += ".theme-toggle{flex:0;min-width:50px;padding:12px 15px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer;font-size:18px;text-align:center;text-decoration:none;transition:background 0.3s}";
     css += ".theme-toggle:hover{background:#0b7dda}";
     css += "body.dark-mode .theme-toggle{background:#1e4d7a}";
     css += "body.dark-mode .theme-toggle:hover{background:#163c5f}";
@@ -1279,7 +1279,6 @@ static String buildCSS(void) {
  */
 static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
-    nav += "<button class='theme-toggle' onclick='toggleDarkMode()' title='Toggle Dark Mode'>🌓</button>";
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
     nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
     nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
@@ -1287,6 +1286,7 @@ static String buildNavBar(const char* activePage) {
     nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";
     nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";
+    nav += "<button class='theme-toggle' onclick='toggleDarkMode()' title='Toggle Dark Mode'>🌓</button>";
     nav += "</div>";
     nav += "<script>function toggleDarkMode(){document.body.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.body.classList.contains('dark-mode'));}</script>";
 
