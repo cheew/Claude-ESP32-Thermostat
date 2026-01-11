@@ -99,8 +99,23 @@ void mqtt_publish_mode(const char* mode);
  * @param mode Operating mode
  * @param power Power output percentage (0-100)
  */
-void mqtt_publish_status(float temperature, float setpoint, 
+void mqtt_publish_status(float temperature, float setpoint,
                          bool heating, const char* mode, int power);
+
+/**
+ * Publish extended status with system info (JSON)
+ * @param temperature Current temperature
+ * @param setpoint Target temperature
+ * @param heating Heating state
+ * @param mode Operating mode
+ * @param power Power output percentage (0-100)
+ * @param wifiRssi WiFi signal strength (dBm)
+ * @param freeHeap Free heap memory (bytes)
+ * @param uptimeSeconds System uptime (seconds)
+ */
+void mqtt_publish_status_extended(float temperature, float setpoint,
+                                   bool heating, const char* mode, int power,
+                                   int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds);
 
 /**
  * Send Home Assistant auto-discovery messages

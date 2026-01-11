@@ -192,8 +192,9 @@ void loop() {
     // Publish MQTT status (every 30s)
     if (!wifi_is_ap_mode() && mqtt_is_connected()) {
         if (millis() - lastMqttPublish >= 30000) {
-            mqtt_publish_status(state->currentTemp, state->targetTemp, 
-                               state->heating, state->mode, state->power);
+            mqtt_publish_status_extended(state->currentTemp, state->targetTemp,
+                                        state->heating, state->mode, state->power,
+                                        WiFi.RSSI(), ESP.getFreeHeap(), millis() / 1000);
             lastMqttPublish = millis();
             
             // Send HA discovery once

@@ -221,6 +221,46 @@ void mqtt_publish_status(float temperature, float setpoint,
 }
 
 /**
+ * Publish extended status with system info
+ */
+void mqtt_publish_status_extended(float temperature, float setpoint,
+                                   bool heating, const char* mode, int power,
+                                   int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds) {
+    if (!mqttClient.connected()) return;
+
+    // Publish individual topics
+    mqtt_publish_temperature(temperature);
+    mqtt_publish_state(heating);
+    mqtt_publish_mode(mode);
+
+    // Publish extended JSON status with system info
+    StaticJsonDocument<512> doc;
+
+    // Core thermostat data
+    doc["temperature"] = round(temperature * 10) / 10.0;
+    doc["setpoint"] = setpoint;
+    doc["heating"] = heating;
+    doc["mode"] = mode;
+    doc["power"] = power;
+
+    // System information
+    doc["wifi_rssi"] = wifiRssi;
+    doc["free_heap"] = freeHeap;
+    doc["uptime"] = uptimeSeconds;
+
+    // Calculated uptime breakdown
+    JsonObject uptime = doc.createNestedObject("uptime_breakdown");
+    uptime["days"] = uptimeSeconds / 86400;
+    uptime["hours"] = (uptimeSeconds % 86400) / 3600;
+    uptime["minutes"] = (uptimeSeconds % 3600) / 60;
+    uptime["seconds"] = uptimeSeconds % 60;
+
+    char output[512];
+    serializeJson(doc, output);
+    mqttClient.publish(statusTopic, output, true);
+}
+
+/**
  * Send Home Assistant auto-discovery
  */
 void mqtt_send_ha_discovery(const char* devName, const char* devId) {
@@ -287,8 +327,71 @@ void mqtt_send_ha_discovery(const char* devName, const char* devId) {
     snprintf(climateDiscTopic, sizeof(climateDiscTopic),
              "%s/climate/%s/config", HA_DISCOVERY_PREFIX, deviceId);
     mqttClient.publish(climateDiscTopic, climatePayload, true);
-    
-    Serial.println("[MQTT] Home Assistant discovery sent");
+
+    // WiFi RSSI sensor
+    StaticJsonDocument<512> rssiDoc;
+    rssiDoc["name"] = String(deviceName) + " WiFi Signal";
+    rssiDoc["state_topic"] = statusTopic;
+    rssiDoc["value_template"] = "{{ value_json.wifi_rssi }}";
+    rssiDoc["unit_of_measurement"] = "dBm";
+    rssiDoc["device_class"] = "signal_strength";
+    rssiDoc["unique_id"] = String(deviceId) + "_rssi";
+    rssiDoc["entity_category"] = "diagnostic";
+
+    JsonObject rssiDevice = rssiDoc.createNestedObject("device");
+    rssiDevice["identifiers"][0] = deviceId;
+
+    char rssiPayload[512];
+    serializeJson(rssiDoc, rssiPayload);
+
+    char rssiDiscTopic[128];
+    snprintf(rssiDiscTopic, sizeof(rssiDiscTopic),
+             "%s/sensor/%s_rssi/config", HA_DISCOVERY_PREFIX, deviceId);
+    mqttClient.publish(rssiDiscTopic, rssiPayload, true);
+
+    // Free heap sensor
+    StaticJsonDocument<512> heapDoc;
+    heapDoc["name"] = String(deviceName) + " Free Memory";
+    heapDoc["state_topic"] = statusTopic;
+    heapDoc["value_template"] = "{{ value_json.free_heap }}";
+    heapDoc["unit_of_measurement"] = "bytes";
+    heapDoc["unique_id"] = String(deviceId) + "_heap";
+    heapDoc["entity_category"] = "diagnostic";
+    heapDoc["icon"] = "mdi:memory";
+
+    JsonObject heapDevice = heapDoc.createNestedObject("device");
+    heapDevice["identifiers"][0] = deviceId;
+
+    char heapPayload[512];
+    serializeJson(heapDoc, heapPayload);
+
+    char heapDiscTopic[128];
+    snprintf(heapDiscTopic, sizeof(heapDiscTopic),
+             "%s/sensor/%s_heap/config", HA_DISCOVERY_PREFIX, deviceId);
+    mqttClient.publish(heapDiscTopic, heapPayload, true);
+
+    // Uptime sensor
+    StaticJsonDocument<512> uptimeDoc;
+    uptimeDoc["name"] = String(deviceName) + " Uptime";
+    uptimeDoc["state_topic"] = statusTopic;
+    uptimeDoc["value_template"] = "{{ value_json.uptime }}";
+    uptimeDoc["unit_of_measurement"] = "s";
+    uptimeDoc["unique_id"] = String(deviceId) + "_uptime";
+    uptimeDoc["entity_category"] = "diagnostic";
+    uptimeDoc["icon"] = "mdi:clock-outline";
+
+    JsonObject uptimeDevice = uptimeDoc.createNestedObject("device");
+    uptimeDevice["identifiers"][0] = deviceId;
+
+    char uptimePayload[512];
+    serializeJson(uptimeDoc, uptimePayload);
+
+    char uptimeDiscTopic[128];
+    snprintf(uptimeDiscTopic, sizeof(uptimeDiscTopic),
+             "%s/sensor/%s_uptime/config", HA_DISCOVERY_PREFIX, deviceId);
+    mqttClient.publish(uptimeDiscTopic, uptimePayload, true);
+
+    Serial.println("[MQTT] Home Assistant discovery sent (5 entities)");
 }
 
 /**
