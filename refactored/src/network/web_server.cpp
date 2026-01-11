@@ -6,6 +6,7 @@
 #include "web_server.h"
 #include "scheduler.h"
 #include "logger.h"
+#include "temp_history.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -51,10 +52,12 @@ static const char* GITHUB_FIRMWARE = "firmware.bin";
 // Forward declarations - Route handlers
 static void handleRoot(void);
 static void handleSchedule(void);
+static void handleHistoryPage(void);
 static void handleInfo(void);
 static void handleLogs(void);
 static void handleSettings(void);
 static void handleStatus(void);
+static void handleHistory(void);
 static void handleSet(void);
 static void handleSaveSettings(void);
 static void handleSaveSchedule(void);
@@ -78,12 +81,14 @@ void webserver_init(void) {
     // Setup routes
     server.on("/", handleRoot);
     server.on("/schedule", handleSchedule);
+    server.on("/history", handleHistoryPage);
     server.on("/info", handleInfo);
     server.on("/logs", handleLogs);
     server.on("/settings", handleSettings);
     
     // API endpoints
     server.on("/api/status", handleStatus);
+    server.on("/api/history", handleHistory);
     server.on("/api/set", HTTP_POST, handleSet);
     server.on("/api/save-settings", HTTP_POST, handleSaveSettings);
     server.on("/api/save-schedule", HTTP_POST, handleSaveSchedule);
@@ -248,6 +253,31 @@ static void handleStatus(void) {
 }
 
 /**
+ * Handle /api/history
+ */
+static void handleHistory(void) {
+    DynamicJsonDocument doc(8192);  // Large buffer for history data
+    JsonArray data = doc.createNestedArray("data");
+
+    int count = temp_history_get_count();
+    for (int i = 0; i < count; i++) {
+        const TempHistoryPoint_t* point = temp_history_get_point(i);
+        if (point != nullptr) {
+            JsonObject reading = data.createNestedObject();
+            reading["timestamp"] = point->timestamp;
+            reading["temperature"] = round(point->temperature * 10) / 10.0;
+        }
+    }
+
+    doc["count"] = count;
+    doc["interval"] = HISTORY_SAMPLE_INTERVAL / 1000;  // Convert to seconds
+
+    String output;
+    serializeJson(doc, output);
+    server.send(200, "application/json", output);
+}
+
+/**
  * Handle /api/set
  */
 static void handleSet(void) {
@@ -360,6 +390,60 @@ static void handleLogs(void) {
     html += "</div>";
     html += "<div style='margin-top:20px'><button onclick='location.reload()' class='btn-secondary'>Refresh Logs</button></div>";
     
+    html += webserver_get_html_footer(millis() / 1000);
+    server.send(200, "text/html", html);
+}
+
+/**
+ * Handle history page
+ */
+static void handleHistoryPage(void) {
+    String html = webserver_get_html_header("Temperature History", "history");
+
+    html += "<h2>Temperature History</h2>";
+
+    int count = temp_history_get_count();
+    html += "<div class='info-box'>";
+    html += "Recording every 5 minutes. Currently storing " + String(count) + " readings";
+    if (count >= HISTORY_BUFFER_SIZE) {
+        html += " (last 24 hours)";
+    }
+    html += "</div>";
+
+    // Chart canvas
+    html += "<div style='background:white;padding:15px;border-radius:5px;margin-top:15px'>";
+    html += "<canvas id='tempChart' style='width:100%;max-height:400px'></canvas>";
+    html += "</div>";
+
+    // Chart.js from CDN
+    html += "<script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'></script>";
+    html += "<script>";
+    html += "fetch('/api/history').then(r=>r.json()).then(data=>{";
+    html += "const ctx=document.getElementById('tempChart').getContext('2d');";
+    html += "new Chart(ctx,{";
+    html += "type:'line',";
+    html += "data:{";
+    html += "labels:data.data.map(d=>new Date(d.timestamp*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})),";
+    html += "datasets:[{";
+    html += "label:'Temperature (°C)',";
+    html += "data:data.data.map(d=>d.temperature),";
+    html += "borderColor:'rgb(255,99,71)',";
+    html += "backgroundColor:'rgba(255,99,71,0.1)',";
+    html += "tension:0.4,";
+    html += "fill:true";
+    html += "}]},";
+    html += "options:{";
+    html += "responsive:true,";
+    html += "maintainAspectRatio:false,";
+    html += "plugins:{legend:{display:true}},";
+    html += "scales:{";
+    html += "y:{beginAtZero:false,title:{display:true,text:'Temperature (°C)'}},";
+    html += "x:{title:{display:true,text:'Time'}}";
+    html += "}}";
+    html += "});";
+    html += "}).catch(e=>console.error('Error loading history:',e));";
+    html += "</script>";
+
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
 }
@@ -949,6 +1033,7 @@ static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
     nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
+    nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
     nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";
     nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";

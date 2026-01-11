@@ -32,9 +32,10 @@
 
 // Include utilities (Phase 6)
 #include "logger.h"
+#include "temp_history.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "1.5.0"
+#define FIRMWARE_VERSION "1.6.0"
 
 // Timing
 unsigned long lastTempRead = 0;
@@ -55,8 +56,9 @@ void setup() {
     Serial.begin(115200);
     bootTime = millis();
 
-    // Initialize logger
+    // Initialize logger and history
     logger_init(bootTime);
+    temp_history_init(bootTime);
 
     Serial.println("=== ESP32 Reptile Thermostat v" FIRMWARE_VERSION " ===");
     logger_add("System boot - v" FIRMWARE_VERSION);
@@ -344,6 +346,9 @@ void readTemperature(void) {
             state_set_current_temp(temp);
             tft_request_update();
         }
+
+        // Record to history (module handles sampling interval)
+        temp_history_record(temp);
     } else {
         static unsigned long lastError = 0;
         if (millis() - lastError > 60000) {
