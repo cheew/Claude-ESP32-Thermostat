@@ -8,6 +8,8 @@
 #include "logger.h"
 #include "temp_history.h"
 #include "console.h"
+#include "sensor_manager.h"
+#include "output_manager.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -74,6 +76,14 @@ static void handleUploadDone(void);
 static void handleCheckUpdate(void);
 static void handleAutoUpdate(void);
 
+// Multi-output API handlers
+static void handleOutputsAPI(void);
+static void handleOutputAPI(void);
+static void handleOutputControl(void);
+static void handleOutputConfig(void);
+static void handleSensorsAPI(void);
+static void handleSensorName(void);
+
 // HTML generation helpers
 static String buildCSS(void);
 static String buildNavBar(const char* activePage);
@@ -86,6 +96,162 @@ void webserver_init(void) {
     
     // Setup routes
     server.on("/", handleRoot);
+    server.on("/outputs", []() {
+        String html = webserver_get_html_header("Outputs", "outputs");
+
+        html += "<h2>Output Configuration</h2>";
+        html += "<p>Configure each output's settings, sensor assignment, and PID parameters.</p>";
+
+        // Output selector tabs
+        html += "<div style='display:flex;gap:10px;margin:20px 0'>";
+        for (int i = 1; i <= 3; i++) {
+            html += "<button onclick='showOutput(" + String(i) + ")' id='tab" + String(i) + "' style='padding:10px 20px;cursor:pointer'>";
+            html += "Output " + String(i) + "</button>";
+        }
+        html += "</div>";
+
+        html += "<script>";
+        html += "let currentOutput=1;";
+        html += "function showOutput(id){currentOutput=id;";
+        html += "for(let i=1;i<=3;i++){document.getElementById('tab'+i).style.background=i===id?'#2196F3':'#f0f0f0';";
+        html += "document.getElementById('tab'+i).style.color=i===id?'white':'black';}";
+        html += "loadOutput(id);}";
+        html += "function loadOutput(id){fetch('/api/output/'+id).then(r=>r.json()).then(d=>{";
+        html += "document.getElementById('out-name').value=d.name;";
+        html += "document.getElementById('out-enabled').checked=d.enabled;";
+        html += "document.getElementById('out-sensor').value=d.sensor;";
+        html += "document.getElementById('out-target').value=d.target;";
+        html += "document.getElementById('out-mode').value=d.mode.toLowerCase();";
+        html += "document.getElementById('out-power').value=d.manualPower;";
+        html += "document.getElementById('out-kp').value=d.pid.kp;";
+        html += "document.getElementById('out-ki').value=d.pid.ki;";
+        html += "document.getElementById('out-kd').value=d.pid.kd;";
+        html += "document.getElementById('device-info').innerHTML='<strong>Device:</strong> '+d.deviceType+' | <strong>Hardware:</strong> '+d.hardwareType;";
+        html += "});}";
+        html += "function saveConfig(){let data={";
+        html += "name:document.getElementById('out-name').value,";
+        html += "enabled:document.getElementById('out-enabled').checked,";
+        html += "sensor:document.getElementById('out-sensor').value,";
+        html += "pid:{kp:parseFloat(document.getElementById('out-kp').value),";
+        html += "ki:parseFloat(document.getElementById('out-ki').value),";
+        html += "kd:parseFloat(document.getElementById('out-kd').value)}};";
+        html += "fetch('/api/output/'+currentOutput+'/config',{method:'POST',";
+        html += "headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})";
+        html += ".then(()=>alert('Saved!'));}";
+        html += "function saveControl(){let data={";
+        html += "target:parseFloat(document.getElementById('out-target').value),";
+        html += "mode:document.getElementById('out-mode').value,";
+        html += "power:parseInt(document.getElementById('out-power').value)};";
+        html += "fetch('/api/output/'+currentOutput+'/control',{method:'POST',";
+        html += "headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})";
+        html += ".then(()=>alert('Control updated!'));}";
+        html += "showOutput(1);";
+        html += "</script>";
+
+        // Configuration form
+        html += "<div style='background:#f9f9f9;padding:20px;border-radius:8px;margin:20px 0'>";
+
+        html += "<h3>Basic Settings</h3>";
+        html += "<div style='margin:10px 0'><label><input type='checkbox' id='out-enabled'> Enabled</label></div>";
+        html += "<div style='margin:10px 0'><label>Name: <input type='text' id='out-name' style='width:300px'></label></div>";
+
+        html += "<div style='margin:10px 0'><label>Sensor: <select id='out-sensor' style='width:300px'>";
+        int sensorCount = sensor_manager_get_count();
+        for (int i = 0; i < sensorCount; i++) {
+            const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
+            if (sensor) {
+                html += "<option value='" + String(sensor->addressString) + "'>" + String(sensor->name) + "</option>";
+            }
+        }
+        html += "</select></label></div>";
+
+        html += "<div id='device-info' style='margin:10px 0;padding:10px;background:#e3f2fd;border-radius:5px'></div>";
+
+        html += "<button onclick='saveConfig()' style='margin:10px 5px 10px 0;padding:10px 20px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer'>Save Configuration</button>";
+
+        html += "<h3>Control Settings</h3>";
+        html += "<div style='margin:10px 0'><label>Target Temperature (°C): <input type='number' id='out-target' step='0.5' min='15' max='45' style='width:100px'></label></div>";
+        html += "<div style='margin:10px 0'><label>Mode: <select id='out-mode' style='width:200px'>";
+        html += "<option value='off'>Off</option>";
+        html += "<option value='manual'>Manual</option>";
+        html += "<option value='pid'>PID (Auto)</option>";
+        html += "<option value='onoff'>On/Off Thermostat</option>";
+        html += "<option value='schedule'>Schedule</option>";
+        html += "</select></label></div>";
+        html += "<div style='margin:10px 0'><label>Manual Power (%): <input type='number' id='out-power' min='0' max='100' style='width:100px'></label></div>";
+
+        html += "<button onclick='saveControl()' style='margin:10px 5px 10px 0;padding:10px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer'>Apply Control</button>";
+
+        html += "<h3>PID Tuning</h3>";
+        html += "<div style='margin:10px 0'><label>Kp (Proportional): <input type='number' id='out-kp' step='0.1' style='width:100px'></label></div>";
+        html += "<div style='margin:10px 0'><label>Ki (Integral): <input type='number' id='out-ki' step='0.01' style='width:100px'></label></div>";
+        html += "<div style='margin:10px 0'><label>Kd (Derivative): <input type='number' id='out-kd' step='0.1' style='width:100px'></label></div>";
+
+        html += "<p style='color:#666;font-size:14px'>💡 PID tuning affects auto (PID) mode. Start with Kp=10, Ki=0.5, Kd=2 and adjust based on performance.</p>";
+
+        html += "</div>";
+
+        html += webserver_get_html_footer(millis() / 1000);
+        server.send(200, "text/html", html);
+    });
+    server.on("/sensors", []() {
+        String html = webserver_get_html_header("Sensors", "sensors");
+
+        html += "<h2>Temperature Sensors</h2>";
+        html += "<p>Manage your DS18B20 temperature sensors. Rename sensors for easier identification.</p>";
+
+        // Auto-refresh script
+        html += "<script>function updateSensors(){fetch('/api/sensors').then(r=>r.json()).then(d=>{";
+        html += "let tbody=document.getElementById('sensor-tbody');tbody.innerHTML='';";
+        html += "d.sensors.forEach(s=>{let row=tbody.insertRow();";
+        html += "row.innerHTML=`<td>${s.name}</td><td>${s.temp}°C</td><td><small>${s.address}</small></td>";
+        html += "<td><button onclick='renameSensor(\"${s.address}\",\"${s.name}\")'>Rename</button></td>`;";
+        html += "});});}updateSensors();setInterval(updateSensors,3000);";
+        html += "function renameSensor(addr,oldName){let name=prompt('Rename sensor:',oldName);if(name&&name!==oldName){";
+        html += "fetch('/api/sensor/name',{method:'POST',headers:{'Content-Type':'application/json'},";
+        html += "body:JSON.stringify({address:addr,name:name})}).then(()=>updateSensors());}}";
+        html += "</script>";
+
+        // Sensors table
+        html += "<table style='width:100%;border-collapse:collapse;margin:20px 0'>";
+        html += "<thead><tr style='background:#f0f0f0'><th style='padding:10px;text-align:left'>Name</th>";
+        html += "<th style='padding:10px;text-align:left'>Temperature</th>";
+        html += "<th style='padding:10px;text-align:left'>Address</th>";
+        html += "<th style='padding:10px;text-align:left'>Actions</th></tr></thead>";
+        html += "<tbody id='sensor-tbody'>";
+
+        // Generate initial rows
+        int sensorCount = sensor_manager_get_count();
+        if (sensorCount == 0) {
+            html += "<tr><td colspan='4' style='padding:20px;text-align:center;color:#999'>No sensors found. Check wiring and restart.</td></tr>";
+        } else {
+            for (int i = 0; i < sensorCount; i++) {
+                const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
+                if (!sensor) continue;
+
+                html += "<tr style='border-bottom:1px solid #ddd'>";
+                html += "<td style='padding:10px'>" + String(sensor->name) + "</td>";
+                html += "<td style='padding:10px'>" + String(sensor->lastReading, 1) + "°C</td>";
+                html += "<td style='padding:10px'><small>" + String(sensor->addressString) + "</small></td>";
+                html += "<td style='padding:10px'><button onclick='renameSensor(\"" + String(sensor->addressString) + "\",\"" + String(sensor->name) + "\")'>Rename</button></td>";
+                html += "</tr>";
+            }
+        }
+
+        html += "</tbody></table>";
+
+        html += "<div style='margin:20px 0;padding:15px;background:#e3f2fd;border-radius:8px'>";
+        html += "<strong>ℹ️ Sensor Information:</strong><br>";
+        html += "• Sensors are auto-discovered on boot<br>";
+        html += "• Each sensor has a unique 64-bit ROM address<br>";
+        html += "• Assign sensors to outputs in <a href='/outputs'>Outputs Configuration</a><br>";
+        html += "• Temperature updates every 2 seconds<br>";
+        html += "• To add new sensors: power off, connect sensor, power on";
+        html += "</div>";
+
+        html += webserver_get_html_footer(millis() / 1000);
+        server.send(200, "text/html", html);
+    });
     server.on("/schedule", handleSchedule);
     server.on("/history", handleHistoryPage);
     server.on("/info", handleInfo);
@@ -112,6 +278,22 @@ void webserver_init(void) {
         console_clear();
         server.send(200, "text/plain", "OK");
     });
+
+    // Multi-output API routes
+    server.on("/api/outputs", HTTP_GET, handleOutputsAPI);
+    server.on("/api/output/1", HTTP_GET, handleOutputAPI);
+    server.on("/api/output/2", HTTP_GET, handleOutputAPI);
+    server.on("/api/output/3", HTTP_GET, handleOutputAPI);
+    server.on("/api/output/1/control", HTTP_POST, handleOutputControl);
+    server.on("/api/output/2/control", HTTP_POST, handleOutputControl);
+    server.on("/api/output/3/control", HTTP_POST, handleOutputControl);
+    server.on("/api/output/1/config", HTTP_POST, handleOutputConfig);
+    server.on("/api/output/2/config", HTTP_POST, handleOutputConfig);
+    server.on("/api/output/3/config", HTTP_POST, handleOutputConfig);
+
+    // Sensor API routes
+    server.on("/api/sensors", HTTP_GET, handleSensorsAPI);
+    server.on("/api/sensor/name", HTTP_POST, handleSensorName);
 
     // OTA update routes
     server.on("/update", handleUpdate);
@@ -200,55 +382,70 @@ void webserver_set_schedule_data(bool enabled, int slotCount, void* slots) {
 // ===== ROUTE HANDLERS =====
 
 /**
- * Handle root page (/)
+ * Handle root page (/) - Multi-Output Version
  */
 static void handleRoot(void) {
     String html = webserver_get_html_header("Home", "home");
-    
+
     if (networkAPMode) {
         html += "<div class='warning-box'><strong>⚠️ AP Mode Active</strong><br>";
         html += "Configure WiFi in <a href='/settings'>Settings</a></div>";
     }
-    
-    // Auto-refresh script
-    html += "<script>setInterval(()=>fetch('/api/status').then(r=>r.json()).then(d=>{";
-    html += "document.getElementById('temp').innerText=d.temperature+'°C';";
-    html += "document.getElementById('target').innerText=d.setpoint+'°C';";
-    html += "document.getElementById('heating').innerText=d.heating?'ON':'OFF';";
-    html += "document.getElementById('mode').innerText=d.mode.toUpperCase();";
-    html += "document.getElementById('power-val').innerText=d.power+'%';";
-    html += "document.getElementById('power-fill').style.width=d.power+'%';";
-    html += "let statusDiv=document.querySelector('.status');";
-    html += "statusDiv.style.background=d.heating?'#ffebee':'#e8f5e9';";
-    html += "}),2000);</script>";
-    
-    // Status display
-    html += "<h2>Current Status</h2>";
-    html += "<div class='status' style='background:" + String(heatingState ? "#ffebee" : "#e8f5e9") + "'>";
-    html += "<div><strong>Current:</strong> <span id='temp'>" + String(currentTemp, 1) + "°C</span></div>";
-    html += "<div><strong>Target:</strong> <span id='target'>" + String(targetTemp, 1) + "°C</span></div>";
-    html += "<div><strong>Heating:</strong> <span id='heating'>" + String(heatingState ? "ON" : "OFF") + "</span></div>";
-    html += "<div><strong>Mode:</strong> <span id='mode'>" + String(currentMode) + "</span></div>";
+
+    // Multi-output auto-refresh script
+    html += "<script>function updateOutputs(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
+    html += "d.outputs.forEach((o,i)=>{let id=i+1;";
+    html += "document.getElementById('temp'+id).innerText=o.temp+'°C';";
+    html += "document.getElementById('target'+id).innerText=o.target+'°C';";
+    html += "document.getElementById('heating'+id).innerText=o.heating?'ON':'OFF';";
+    html += "document.getElementById('mode'+id).innerText=o.mode;";
+    html += "document.getElementById('power-val'+id).innerText=o.power+'%';";
+    html += "document.getElementById('power-fill'+id).style.width=o.power+'%';";
+    html += "let card=document.getElementById('output'+id);";
+    html += "card.style.background=o.heating?'#ffebee':'#e8f5e9';";
+    html += "card.style.opacity=o.enabled?'1':'0.5';";
+    html += "});});}updateOutputs();setInterval(updateOutputs,2000);</script>";
+
+    html += "<h2>Outputs</h2>";
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px;margin:20px 0'>";
+
+    // Generate cards for all 3 outputs
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (!output) continue;
+
+        int id = i + 1;
+        String bgColor = output->heating ? "#ffebee" : "#e8f5e9";
+
+        html += "<div id='output" + String(id) + "' style='background:" + bgColor + ";padding:15px;border-radius:8px;";
+        html += "box-shadow:0 2px 5px rgba(0,0,0,0.1);opacity:" + String(output->enabled ? "1" : "0.5") + "'>";
+        html += "<h3 style='margin:0 0 10px 0'>" + String(output->name) + " (Output " + String(id) + ")</h3>";
+
+        // Status info
+        html += "<div style='margin:8px 0'><strong>Current:</strong> <span id='temp" + String(id) + "'>" + String(output->currentTemp, 1) + "°C</span></div>";
+        html += "<div style='margin:8px 0'><strong>Target:</strong> <span id='target" + String(id) + "'>" + String(output->targetTemp, 1) + "°C</span></div>";
+        html += "<div style='margin:8px 0'><strong>Status:</strong> <span id='heating" + String(id) + "'>" + String(output->heating ? "ON" : "OFF") + "</span></div>";
+        html += "<div style='margin:8px 0'><strong>Mode:</strong> <span id='mode" + String(id) + "'>" + String(output_manager_get_mode_name(output->controlMode)) + "</span></div>";
+
+        // Power bar
+        html += "<div style='margin:10px 0'><strong>Power: <span id='power-val" + String(id) + "'>" + String(output->currentPower) + "%</span></strong>";
+        html += "<div style='width:100%;height:20px;background:#ddd;border-radius:5px;overflow:hidden;margin-top:5px'>";
+        html += "<div id='power-fill" + String(id) + "' style='height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s;width:" + String(output->currentPower) + "%'></div></div></div>";
+
+        // Quick controls
+        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'off'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Off</button>";
+        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'manual',power:50})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Manual 50%</button>";
+        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'pid'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>PID</button>";
+
+        html += "</div>";
+    }
+
     html += "</div>";
-    
-    // Power output visualization
-    html += "<div style='margin:20px 0'><strong>Power Output: <span id='power-val'>" + String(powerOutput) + "%</span></strong>";
-    html += "<div style='width:100%;height:30px;background:#ddd;border-radius:5px;overflow:hidden'>";
-    html += "<div id='power-fill' style='height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s;width:" + String(powerOutput) + "%'></div></div></div>";
-    
-    // Control form
-    html += "<form action='/api/set' method='POST'>";
-    html += "<h2>Temperature Control</h2>";
-    html += "<div class='control'><label>Target Temperature (°C):</label>";
-    html += "<input type='number' name='target' value='" + String(targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
-    html += "<div class='control'><label>Mode:</label>";
-    html += "<select name='mode'>";
-    html += "<option value='auto'" + String(strcmp(currentMode, "auto") == 0 ? " selected" : "") + ">Auto (PID)</option>";
-    html += "<option value='on'" + String(strcmp(currentMode, "on") == 0 ? " selected" : "") + ">Manual On (100%)</option>";
-    html += "<option value='off'" + String(strcmp(currentMode, "off") == 0 ? " selected" : "") + ">Off</option>";
-    html += "</select></div>";
-    html += "<button type='submit'>Update Settings</button></form>";
-    
+
+    html += "<p style='margin-top:20px;text-align:center;color:#666'>";
+    html += "💡 Visit <a href='/outputs'>Outputs Configuration</a> for detailed control | ";
+    html += "🌡️ Visit <a href='/sensors'>Sensors</a> to manage sensors</p>";
+
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
 }
@@ -774,109 +971,117 @@ static void handleSettings(void) {
  */
 static void handleSchedule(void) {
     String html = webserver_get_html_header("Schedule", "schedule");
-    
-    bool enabled = scheduler_is_enabled();
-    int slotCount = scheduler_get_slot_count();
-    
-    // Schedule enable/disable toggle
+
     html += "<div style='margin:20px 0;display:flex;justify-content:space-between;align-items:center'>";
     html += "<h2 style='margin:0'>Temperature Schedule</h2>";
+    html += "</div>";
+
+    // Output selector dropdown
+    html += "<div style='margin:20px 0;padding:15px;background:#f0f0f0;border-radius:8px'>";
     html += "<label style='display:flex;align-items:center;gap:10px'>";
-    html += "<span>Schedule " + String(enabled ? "Enabled" : "Disabled") + "</span>";
-    html += "<input type='checkbox' id='schedule-enabled' " + String(enabled ? "checked" : "") + " ";
-    html += "onchange='toggleSchedule()' style='width:auto;height:20px'>";
-    html += "</label></div>";
-    
-    // Show next scheduled change
-    char nextTime[10];
-    float nextTemp;
-    if (enabled && scheduler_get_next(nextTime, &nextTemp)) {
-        html += "<div class='info-box'>📅 Next: " + String(nextTemp, 1) + "°C at " + String(nextTime) + "</div>";
-    }
-    
-    html += "<form id='schedule-form'>";
-    
-    // Schedule slots
-    for (int i = 0; i < 8; i++) {
-        if (i >= slotCount && i > 3) continue;
-        
-        ScheduleSlot_t slot;
-        scheduler_get_slot(i, &slot);
-        
-        bool isActive = (i < slotCount) && slot.enabled;
-        
-        html += "<div class='schedule-slot' style='border:2px solid " + String(isActive ? "#4CAF50" : "#ddd") + ";";
-        html += "padding:15px;border-radius:10px;margin:15px 0;background:" + String(isActive ? "#f1f8f4" : "#f9f9f9") + "'>";
-        
-        html += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>";
-        html += "<strong>Slot " + String(i + 1) + "</strong>";
-        html += "<label style='display:flex;align-items:center;gap:5px'>";
-        html += "<input type='checkbox' name='enabled" + String(i) + "' " + String(isActive ? "checked" : "") + " style='width:auto'>";
-        html += "<span>Active</span></label></div>";
-        
-        // Time and temperature
-        html += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0'>";
-        html += "<div><label>Hour</label><input type='number' name='hour" + String(i) + "' value='" + String(slot.hour) + "' min='0' max='23'></div>";
-        html += "<div><label>Minute</label><input type='number' name='minute" + String(i) + "' value='" + String(slot.minute) + "' min='0' max='59'></div>";
-        html += "<div><label>Temp (°C)</label><input type='number' name='temp" + String(i) + "' value='" + String(slot.targetTemp, 1) + "' step='0.5' min='15' max='45'></div>";
-        html += "</div>";
-        
-        // Days
-        html += "<div><label>Active Days:</label>";
-        html += "<div style='display:flex;flex-wrap:wrap;gap:5px;margin-top:5px'>";
-        String dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        for (int d = 0; d < 7; d++) {
-            char dayChar = "SMTWTFS"[d];
-            bool checked = (strchr(slot.days, dayChar) != NULL);
-            html += "<label style='min-width:40px;flex:1;max-width:60px;text-align:center;padding:8px 4px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
-            html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer;font-size:12px'>";
-            html += "<input type='checkbox' name='day" + String(i) + "_" + String(d) + "' " + String(checked ? "checked" : "") + " ";
-            html += "style='display:none' onchange='this.parentElement.style.background=this.checked?\"#4CAF50\":\"#ddd\";";
-            html += "this.parentElement.style.color=this.checked?\"white\":\"#666\"'>";
-            html += dayNames[d] + "</label>";
+    html += "<strong>Select Output:</strong>";
+    html += "<select id='output-selector' onchange='loadSchedule()' style='padding:8px;font-size:16px;border-radius:5px'>";
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (output) {
+            html += "<option value='" + String(i) + "'>" + String(output->name) + " (Output " + String(i + 1) + ")</option>";
         }
-        html += "</div></div>";
-        html += "</div>"; // End slot
     }
-    
-    // Add/Remove buttons
-    html += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:20px 0'>";
-    if (slotCount < 8) {
-        html += "<button type='button' onclick='addSlot()' class='btn-secondary'>➕ Add Slot</button>";
-    } else {
-        html += "<div></div>";
-    }
-    if (slotCount > 1) {
-        html += "<button type='button' onclick='removeSlot()' class='btn-danger'>➖ Remove Last</button>";
-    }
+    html += "</select>";
+    html += "</label>";
+    html += "<p id='current-output-info' style='margin:10px 0;color:#666;font-size:14px'></p>";
     html += "</div>";
     
-    html += "<button type='button' onclick='saveSchedule()'>Save Schedule</button>";
-    html += "</form>";
+    // Schedule slots container (will be filled by JavaScript)
+    html += "<div id='schedule-slots' style='margin:20px 0'></div>";
+
+    html += "<button type='button' onclick='saveSchedule()' style='margin:20px 0;padding:12px 30px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px'>Save Schedule</button>";
+
+    html += "<div style='margin:20px 0;padding:15px;background:#e3f2fd;border-radius:8px'>";
+    html += "<h4 style='margin:0 0 10px 0'>💡 Schedule Tips</h4>";
+    html += "<ul style='margin:0;padding-left:20px;line-height:1.8'>";
+    html += "<li>Each output has 8 independent schedule slots</li>";
+    html += "<li>Enable/disable individual slots as needed</li>";
+    html += "<li>Select active days for each slot (any combination)</li>";
+    html += "<li>Schedule mode must be selected in Outputs page for this to activate</li>";
+    html += "<li>Empty days = slot disabled</li>";
+    html += "</ul>";
+    html += "</div>";
     
     // JavaScript
     html += "<script>";
-    html += "let slotCount=" + String(slotCount) + ";";
-    html += "function toggleSchedule(){";
-    html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},";
-    html += "body:'schedule_enabled='+document.getElementById('schedule-enabled').checked}).then(()=>location.reload());}";
-    html += "function addSlot(){if(slotCount<8){slotCount++;location.reload();}}";
-    html += "function removeSlot(){if(slotCount>1){slotCount--;location.reload();}}";
-    html += "function saveSchedule(){";
-    html += "let form=document.getElementById('schedule-form');";
-    html += "let data='slot_count='+slotCount;";
+    html += "let currentOutputId=0;";
+    html += "let currentSchedule=[];";
+
+    // Load schedule from API
+    html += "function loadSchedule(){";
+    html += "currentOutputId=parseInt(document.getElementById('output-selector').value);";
+    html += "fetch('/api/output/'+(currentOutputId+1)).then(r=>r.json()).then(d=>{";
+    html += "currentSchedule=d.schedule||[];";
+    html += "document.getElementById('current-output-info').innerHTML='Currently viewing schedule for <strong>'+d.name+'</strong>';";
+    html += "renderSlots();";
+    html += "});}";
+
+    // Render schedule slots HTML
+    html += "function renderSlots(){";
+    html += "let html='';";
+    html += "let dayNames=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];";
     html += "for(let i=0;i<8;i++){";
-    html += "data+='&enabled'+i+'='+(form['enabled'+i]?.checked||false);";
-    html += "data+='&hour'+i+'='+(form['hour'+i]?.value||0);";
-    html += "data+='&minute'+i+'='+(form['minute'+i]?.value||0);";
-    html += "data+='&temp'+i+'='+(form['temp'+i]?.value||28);";
+    html += "let slot=currentSchedule[i]||{enabled:false,hour:0,minute:0,targetTemp:28.0,days:''};";
+    html += "let isActive=slot.enabled&&slot.days.length>0;";
+    html += "html+='<div class=\"schedule-slot\" style=\"border:2px solid '+(isActive?'#4CAF50':'#ddd')+';";
+    html += "padding:15px;border-radius:10px;margin:15px 0;background:'+(isActive?'#f1f8f4':'#f9f9f9')+'\">';";
+    html += "html+='<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:10px\">';";
+    html += "html+='<strong>Slot '+(i+1)+'</strong>';";
+    html += "html+='<label style=\"display:flex;align-items:center;gap:5px\">';";
+    html += "html+='<input type=\"checkbox\" id=\"enabled'+i+'\" '+(isActive?'checked':'')+' style=\"width:auto\">';";
+    html += "html+='<span>Active</span></label></div>';";
+
+    // Time and temperature inputs
+    html += "html+='<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0\">';";
+    html += "html+='<div><label>Hour</label><input type=\"number\" id=\"hour'+i+'\" value=\"'+slot.hour+'\" min=\"0\" max=\"23\"></div>';";
+    html += "html+='<div><label>Minute</label><input type=\"number\" id=\"minute'+i+'\" value=\"'+slot.minute+'\" min=\"0\" max=\"59\"></div>';";
+    html += "html+='<div><label>Temp (°C)</label><input type=\"number\" id=\"temp'+i+'\" value=\"'+slot.targetTemp+'\" step=\"0.5\" min=\"15\" max=\"45\"></div>';";
+    html += "html+='</div>';";
+
+    // Day selector
+    html += "html+='<div><label>Active Days:</label>';";
+    html += "html+='<div style=\"display:flex;flex-wrap:wrap;gap:5px;margin-top:5px\">';";
+    html += "for(let d=0;d<7;d++){";
+    html += "let dayChar='SMTWTFS'[d];";
+    html += "let checked=slot.days.indexOf(dayChar)>=0;";
+    html += "html+='<label style=\"min-width:40px;flex:1;max-width:60px;text-align:center;padding:8px 4px;background:'+(checked?'#4CAF50':'#ddd')+';";
+    html += "color:'+(checked?'white':'#666')+';border-radius:5px;cursor:pointer;font-size:12px\">';";
+    html += "html+='<input type=\"checkbox\" id=\"day'+i+'_'+d+'\" '+(checked?'checked':'')+' ';";
+    html += "html+='style=\"display:none\" onchange=\"this.parentElement.style.background=this.checked?\\'#4CAF50\\':\\'#ddd\\';";
+    html += "this.parentElement.style.color=this.checked?\\'white\\':\\'#666\\'\">';";
+    html += "html+=dayNames[d]+'</label>';}";
+    html += "html+='</div></div>';";
+    html += "html+='</div>';}";
+    html += "document.getElementById('schedule-slots').innerHTML=html;}";
+
+    // Save schedule to API
+    html += "function saveSchedule(){";
+    html += "let schedule=[];";
+    html += "for(let i=0;i<8;i++){";
+    html += "let enabled=document.getElementById('enabled'+i).checked;";
+    html += "let hour=parseInt(document.getElementById('hour'+i).value)||0;";
+    html += "let minute=parseInt(document.getElementById('minute'+i).value)||0;";
+    html += "let targetTemp=parseFloat(document.getElementById('temp'+i).value)||28.0;";
     html += "let days='';";
-    html += "for(let d=0;d<7;d++){if(form['day'+i+'_'+d]?.checked)days+='SMTWTFS'[d];}";
-    html += "data+='&days'+i+'='+days;}";
-    html += "fetch('/api/save-schedule',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:data})";
-    html += ".then(()=>{alert('Schedule saved!');location.reload();});}";
+    html += "for(let d=0;d<7;d++){";
+    html += "if(document.getElementById('day'+i+'_'+d).checked){";
+    html += "days+='SMTWTFS'[d];}}";
+    html += "schedule.push({enabled:enabled&&days.length>0,hour:hour,minute:minute,targetTemp:targetTemp,days:days});}";
+    html += "fetch('/api/output/'+(currentOutputId+1)+'/config',{";
+    html += "method:'POST',headers:{'Content-Type':'application/json'},";
+    html += "body:JSON.stringify({schedule:schedule})})";
+    html += ".then(r=>r.ok?alert('Schedule saved!'):alert('Error saving schedule'));}";
+
+    // Initialize on page load
+    html += "loadSchedule();";
     html += "</script>";
-    
+
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
 }
@@ -1215,10 +1420,303 @@ String webserver_get_html_footer(unsigned long uptimeSeconds) {
 /**
  * Build CSS stylesheet
  */
+// ===== MULTI-OUTPUT API HANDLERS =====
+
+/**
+ * GET /api/outputs - Get all outputs status
+ */
+static void handleOutputsAPI(void) {
+    StaticJsonDocument<1024> doc;
+    JsonArray outputs = doc.createNestedArray("outputs");
+
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (!output) continue;
+
+        JsonObject obj = outputs.createNestedObject();
+        obj["id"] = i + 1;
+        obj["name"] = output->name;
+        obj["enabled"] = output->enabled;
+        obj["temp"] = serialized(String(output->currentTemp, 1));
+        obj["target"] = serialized(String(output->targetTemp, 1));
+        obj["mode"] = output_manager_get_mode_name(output->controlMode);
+        obj["power"] = output->currentPower;
+        obj["heating"] = output->heating;
+        obj["sensor"] = output->sensorAddress;
+        obj["deviceType"] = output_manager_get_device_type_name(output->deviceType);
+        obj["hardwareType"] = output_manager_get_hardware_type_name(output->hardwareType);
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+/**
+ * GET /api/output/{id} - Get single output details
+ */
+static void handleOutputAPI(void) {
+    String path = server.uri();
+    int outputId = path.substring(path.lastIndexOf('/') + 1).toInt();
+    int outputIndex = outputId - 1;
+
+    if (outputIndex < 0 || outputIndex >= 3) {
+        server.send(400, "text/plain", "Invalid output ID");
+        return;
+    }
+
+    OutputConfig_t* output = output_manager_get_output(outputIndex);
+    if (!output) {
+        server.send(404, "text/plain", "Output not found");
+        return;
+    }
+
+    StaticJsonDocument<512> doc;
+    doc["id"] = outputId;
+    doc["name"] = output->name;
+    doc["enabled"] = output->enabled;
+    doc["temp"] = serialized(String(output->currentTemp, 1));
+    doc["target"] = serialized(String(output->targetTemp, 1));
+    doc["mode"] = output_manager_get_mode_name(output->controlMode);
+    doc["power"] = output->currentPower;
+    doc["heating"] = output->heating;
+    doc["sensor"] = output->sensorAddress;
+    doc["deviceType"] = output_manager_get_device_type_name(output->deviceType);
+    doc["hardwareType"] = output_manager_get_hardware_type_name(output->hardwareType);
+    doc["manualPower"] = output->manualPower;
+
+    // PID parameters
+    JsonObject pid = doc.createNestedObject("pid");
+    pid["kp"] = serialized(String(output->pidKp, 2));
+    pid["ki"] = serialized(String(output->pidKi, 2));
+    pid["kd"] = serialized(String(output->pidKd, 2));
+
+    // Schedule
+    JsonArray schedule = doc.createNestedArray("schedule");
+    for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+        JsonObject slot = schedule.createNestedObject();
+        slot["enabled"] = output->schedule[i].enabled;
+        slot["hour"] = output->schedule[i].hour;
+        slot["minute"] = output->schedule[i].minute;
+        slot["target"] = serialized(String(output->schedule[i].targetTemp, 1));
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+/**
+ * POST /api/output/{id}/control - Control output (mode, target, manual power)
+ */
+static void handleOutputControl(void) {
+    String path = server.uri();
+    int outputId = path.substring(path.lastIndexOf('/') - 1, path.lastIndexOf('/')).toInt();
+    int outputIndex = outputId - 1;
+
+    if (outputIndex < 0 || outputIndex >= 3) {
+        server.send(400, "text/plain", "Invalid output ID");
+        return;
+    }
+
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "No data received");
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+    if (error) {
+        server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+
+    // Update target temperature
+    if (doc.containsKey("target")) {
+        float target = doc["target"];
+        output_manager_set_target(outputIndex, target);
+    }
+
+    // Update control mode
+    if (doc.containsKey("mode")) {
+        const char* modeStr = doc["mode"];
+        ControlMode_t mode = CONTROL_MODE_OFF;
+
+        if (strcmp(modeStr, "off") == 0) mode = CONTROL_MODE_OFF;
+        else if (strcmp(modeStr, "manual") == 0) mode = CONTROL_MODE_MANUAL;
+        else if (strcmp(modeStr, "pid") == 0 || strcmp(modeStr, "auto") == 0) mode = CONTROL_MODE_PID;
+        else if (strcmp(modeStr, "onoff") == 0) mode = CONTROL_MODE_ONOFF;
+        else if (strcmp(modeStr, "schedule") == 0) mode = CONTROL_MODE_SCHEDULE;
+
+        output_manager_set_mode(outputIndex, mode);
+    }
+
+    // Update manual power
+    if (doc.containsKey("power")) {
+        int power = doc["power"];
+        output_manager_set_manual_power(outputIndex, power);
+    }
+
+    // Save configuration
+    output_manager_save_config();
+
+    server.send(200, "text/plain", "OK");
+}
+
+/**
+ * POST /api/output/{id}/config - Configure output (name, sensor, device type, PID, schedule)
+ */
+static void handleOutputConfig(void) {
+    String path = server.uri();
+    int outputId = path.substring(path.lastIndexOf('/') - 1, path.lastIndexOf('/')).toInt();
+    int outputIndex = outputId - 1;
+
+    if (outputIndex < 0 || outputIndex >= 3) {
+        server.send(400, "text/plain", "Invalid output ID");
+        return;
+    }
+
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "No data received");
+        return;
+    }
+
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+    if (error) {
+        server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+
+    // Update name
+    if (doc.containsKey("name")) {
+        const char* name = doc["name"];
+        output_manager_set_name(outputIndex, name);
+    }
+
+    // Update enabled state
+    if (doc.containsKey("enabled")) {
+        bool enabled = doc["enabled"];
+        output_manager_set_enabled(outputIndex, enabled);
+    }
+
+    // Update sensor assignment
+    if (doc.containsKey("sensor")) {
+        const char* sensor = doc["sensor"];
+        output_manager_set_sensor(outputIndex, sensor);
+    }
+
+    // Update PID parameters
+    if (doc.containsKey("pid")) {
+        JsonObject pid = doc["pid"];
+        float kp = pid["kp"];
+        float ki = pid["ki"];
+        float kd = pid["kd"];
+        output_manager_set_pid_params(outputIndex, kp, ki, kd);
+    }
+
+    // Update schedule
+    if (doc.containsKey("schedule")) {
+        JsonArray schedule = doc["schedule"];
+        for (int i = 0; i < schedule.size() && i < MAX_SCHEDULE_SLOTS; i++) {
+            JsonObject slot = schedule[i];
+            bool enabled = slot["enabled"];
+            int hour = slot["hour"];
+            int minute = slot["minute"];
+            float target = slot["target"];
+            output_manager_set_schedule_slot(outputIndex, i, enabled, hour, minute, target);
+        }
+    }
+
+    // Save configuration
+    output_manager_save_config();
+
+    server.send(200, "text/plain", "OK");
+}
+
+/**
+ * GET /api/sensors - Get all sensors
+ */
+static void handleSensorsAPI(void) {
+    StaticJsonDocument<1024> doc;
+    JsonArray sensors = doc.createNestedArray("sensors");
+
+    int count = sensor_manager_get_count();
+    for (int i = 0; i < count; i++) {
+        const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
+        if (!sensor) continue;
+
+        JsonObject obj = sensors.createNestedObject();
+        obj["index"] = i;
+        obj["address"] = sensor->addressString;
+        obj["name"] = sensor->name;
+        obj["temp"] = serialized(String(sensor->lastReading, 1));
+        obj["lastRead"] = sensor->lastReadTime;
+        obj["errors"] = sensor->errorCount;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+/**
+ * POST /api/sensor/name - Rename a sensor
+ * Body: {"address": "28FF...", "name": "New Name"}
+ */
+static void handleSensorName(void) {
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "No data received");
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+    if (error) {
+        server.send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+
+    const char* address = doc["address"];
+    const char* name = doc["name"];
+
+    if (!address || !name) {
+        server.send(400, "text/plain", "Missing address or name");
+        return;
+    }
+
+    // Find sensor by address
+    int count = sensor_manager_get_count();
+    bool found = false;
+    for (int i = 0; i < count; i++) {
+        const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
+        if (sensor && strcmp(sensor->addressString, address) == 0) {
+            sensor_manager_set_name(i, name);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        server.send(404, "text/plain", "Sensor not found");
+        return;
+    }
+
+    // Save names
+    sensor_manager_save_names();
+
+    server.send(200, "text/plain", "OK");
+}
+
+// ===== HTML GENERATION HELPERS =====
+
 static String buildCSS(void) {
     String css = "<style>";
-    css += "body{font-family:Arial;margin:0;padding:20px;background:#f0f0f0}";
-    css += "@media(max-width:640px){body{padding:10px}}";
+    css += "*{box-sizing:border-box}";
+    css += "body{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f0f0f0}";
     css += ".container{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}";
     css += ".header{background:linear-gradient(135deg,#4CAF50,#45a049);color:white;padding:20px;border-radius:10px 10px 0 0;margin:-20px -20px 20px -20px;text-align:center}";
     css += ".header h1{margin:0;font-size:24px}";
@@ -1229,12 +1727,12 @@ static String buildCSS(void) {
     css += ".nav a.active{background:#4CAF50}";
     css += "h2{color:#666;border-bottom:2px solid #4CAF50;padding-bottom:5px;margin-top:30px}";
     css += ".status{display:flex;justify-content:space-between;margin:20px 0;padding:15px;border-radius:5px}";
-    css += "@media(max-width:640px){.status{flex-direction:column;gap:10px}}";
     css += ".control{margin:20px 0}";
     css += "label{display:block;margin:10px 0 5px;font-weight:bold}";
-    css += "input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}";
-    css += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px}";
+    css += "input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box;font-size:16px}";
+    css += "button{width:100%;padding:12px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:10px;min-height:44px}";
     css += "button:hover{background:#45a049}";
+    css += "button:active{background:#3d8b40}";
     css += ".btn-secondary{background:#2196F3}";
     css += ".btn-secondary:hover{background:#0b7dda}";
     css += ".btn-danger{background:#f44336}";
@@ -1247,6 +1745,44 @@ static String buildCSS(void) {
     css += ".stat-label{font-size:12px;color:#666;margin-top:5px}";
     css += ".log-entry{padding:10px;border-bottom:1px solid #eee;font-family:monospace;font-size:14px}";
     css += ".footer{text-align:center;margin-top:30px;padding-top:20px;border-top:1px solid #ddd;color:#666;font-size:12px}";
+
+    // Mobile responsive media queries
+    css += "@media(max-width:768px){";
+    css += "body{padding:10px;font-size:16px}";
+    css += ".container{padding:15px;border-radius:5px}";
+    css += ".header{padding:15px;margin:-15px -15px 15px -15px}";
+    css += ".header h1{font-size:20px}";
+    css += ".header .subtitle{font-size:11px}";
+    css += ".nav{gap:8px}";
+    css += ".nav a{min-width:80px;padding:10px 12px;font-size:14px}";
+    css += ".theme-toggle{min-width:44px;padding:10px}";
+    css += ".status{flex-direction:column;gap:10px}";
+    css += "h2{font-size:18px;margin-top:20px}";
+    css += "input,select,button{font-size:16px;min-height:44px;padding:12px}";
+    css += "button{padding:14px 20px}";
+    css += ".stat-grid{grid-template-columns:1fr}";
+    css += ".output-grid{grid-template-columns:1fr!important}";
+    css += ".log-entry{font-size:13px;padding:8px}";
+    css += "}";
+
+    // Extra small screens (phones in portrait)
+    css += "@media(max-width:480px){";
+    css += "body{padding:8px}";
+    css += ".container{padding:12px}";
+    css += ".header{padding:12px;margin:-12px -12px 12px -12px}";
+    css += ".header h1{font-size:18px}";
+    css += ".nav{gap:6px}";
+    css += ".nav a{min-width:70px;padding:8px 10px;font-size:12px}";
+    css += ".theme-toggle{min-width:40px;padding:8px;font-size:16px}";
+    css += "h2{font-size:16px}";
+    css += ".stat-value{font-size:20px}";
+    css += ".stat-label{font-size:11px}";
+    css += "}";
+
+    // Tablet landscape optimizations
+    css += "@media(min-width:769px) and (max-width:1024px){";
+    css += ".output-grid{grid-template-columns:repeat(2,1fr)!important}";
+    css += "}";
 
     // Dark mode overrides
     css += "body.dark-mode{background:#1a1a1a;color:#e0e0e0}";
@@ -1280,6 +1816,8 @@ static String buildCSS(void) {
 static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
+    nav += "<a href='/outputs' class='" + String(strcmp(activePage, "outputs") == 0 ? "active" : "") + "'>💡 Outputs</a>";
+    nav += "<a href='/sensors' class='" + String(strcmp(activePage, "sensors") == 0 ? "active" : "") + "'>🌡️ Sensors</a>";
     nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
     nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
     nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";

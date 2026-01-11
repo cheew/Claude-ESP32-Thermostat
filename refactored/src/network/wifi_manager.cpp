@@ -59,18 +59,22 @@ void wifi_init(void) {
  * WiFi task - handles reconnection
  */
 void wifi_task(void) {
-    // Don't reconnect if in AP mode
+    // In AP mode: periodically try to reconnect to saved WiFi
     if (apMode) {
+        if (millis() - lastConnectionAttempt >= CONNECTION_RETRY_INTERVAL) {
+            Serial.println("[WiFi] AP mode: Attempting to reconnect to WiFi");
+            wifi_connect(NULL, NULL);  // Will switch out of AP mode if successful
+        }
         return;
     }
-    
+
     // Check connection status
     if (WiFi.status() != WL_CONNECTED) {
         if (currentState != WIFI_STATE_DISCONNECTED) {
             Serial.println("[WiFi] Connection lost");
             currentState = WIFI_STATE_DISCONNECTED;
         }
-        
+
         // Attempt reconnection at interval
         if (millis() - lastConnectionAttempt >= CONNECTION_RETRY_INTERVAL) {
             Serial.println("[WiFi] Attempting reconnection...");

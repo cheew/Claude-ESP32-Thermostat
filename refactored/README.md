@@ -1,183 +1,139 @@
 # ESP32 Reptile Thermostat - Modular Architecture
 
-**Version:** 1.4.0  
-**Status:** Phase 1 (Hardware Drivers) Complete  
-**Architecture:** Modular C++
+**Version:** 1.9.0
+**Status:** Modular refactoring complete (Phases 2-6)
+**Architecture:** Modular C (functional style)
 
 ---
 
 ## Project Structure
 
 ```
-esp32-thermostat/
+refactored/
 ├── platformio.ini           # Build configuration
-├── MIGRATION_CHECKLIST.md   # Refactoring progress tracker
 ├── README.md                # This file
+├── SCOPE.md                 # Future features and roadmap
+├── PROJECT_STRUCTURE.md     # Detailed architecture documentation
 │
 ├── include/                 # Header files
-│   ├── config.h            # All configuration constants
-│   └── hardware/           # Hardware driver interfaces
-│       ├── sensor.h        # DS18B20 temperature sensor
-│       ├── dimmer.h        # AC dimmer control
-│       └── display.h       # TFT display & touch
+│   ├── wifi_manager.h
+│   ├── mqtt_manager.h
+│   ├── web_server.h
+│   ├── pid_controller.h
+│   ├── system_state.h
+│   ├── scheduler.h
+│   ├── temp_sensor.h
+│   ├── dimmer_control.h
+│   ├── logger.h
+│   ├── temp_history.h
+│   └── console.h
 │
 └── src/                     # Implementation files
-    ├── main.cpp            # Main program (minimal)
-    └── hardware/           # Hardware driver implementations
-        ├── sensor.cpp
-        ├── dimmer.cpp
-        ├── display.cpp
-        ├── display_screens.cpp  # Screen rendering
-        └── display_touch.cpp    # Touch handlers
+    ├── main.cpp            # Main program (minimal coordination)
+    ├── network/            # Network modules
+    │   ├── wifi_manager.cpp
+    │   ├── mqtt_manager.cpp
+    │   └── web_server.cpp
+    ├── control/            # Control logic
+    │   ├── pid_controller.cpp
+    │   ├── system_state.cpp
+    │   └── scheduler.cpp
+    ├── hardware/           # Hardware abstraction
+    │   ├── temp_sensor.cpp
+    │   └── dimmer_control.cpp
+    └── utils/              # Utilities
+        ├── logger.cpp
+        ├── temp_history.cpp
+        └── console.cpp
 ```
 
 ---
 
-## Modules Overview
+## Current Features
 
-### Configuration (`config.h`)
-Central configuration file containing all constants:
-- Hardware pin definitions
-- System limits and thresholds
-- Network credentials (defaults)
-- PID parameters
-- Display settings
+### Core Functionality
+- **Temperature Control:** PID-based heating control with DS18B20 sensor
+- **Multiple Modes:** Auto (PID), Manual On/Off, Schedule-based
+- **Web Interface:** Full control and monitoring via browser
+- **MQTT Integration:** Home Assistant auto-discovery and control
+- **Temperature Scheduling:** 6 programmable time slots per day
+- **Dark Mode:** System-aware theme with toggle button
+- **Live Console:** Real-time event logging (MQTT, WiFi, temp, PID)
+- **Temperature History:** 24-hour graphing (288 samples @ 5min intervals)
 
-### Hardware Drivers
+### Network & Connectivity
+- **WiFi Manager:** Automatic connection with AP fallback
+- **mDNS Support:** Access via hostname.local
+- **MQTT Client:** Publish/subscribe with extended status
+- **REST API:** JSON endpoints for device info, logs, history, control
+- **Web Server:** Responsive HTML interface with multiple pages
 
-#### Temperature Sensor (`sensor.h/cpp`)
-- **Purpose:** DS18B20 OneWire temperature sensor interface
-- **Features:**
-  - Error detection and counting
-  - Validation of readings
-  - Last-known-good temperature caching
-- **Usage:**
-  ```cpp
-  TemperatureSensor sensor(ONE_WIRE_BUS);
-  sensor.begin();
-  float temp;
-  if (sensor.readTemperature(temp)) {
-      Serial.println(temp);
-  }
-  ```
+### Monitoring & Debugging
+- **System Logs:** Timestamped event logging
+- **Live Console:** Real-time system events with color coding
+- **Temperature Graphs:** Chart.js visualization of history
+- **MQTT Status:** Extended metrics (WiFi RSSI, free heap, uptime)
+- **Home Assistant:** Diagnostic sensors for system health
 
-#### AC Dimmer (`dimmer.h/cpp`)
-- **Purpose:** RobotDyn AC dimmer control
-- **Features:**
-  - Single or dual dimmer support
-  - Power ramping (0-100%)
-  - Zero-cross shared between dimmers
-  - Safety turn-off function
-- **Usage:**
-  ```cpp
-  ACDimmer dimmer(DIMMER_HEAT_PIN, ZEROCROSS_PIN, "Heat");
-  dimmer.begin();
-  dimmer.setPower(50);  // 50% power
-  ```
-
-#### Display (`display.h/cpp`)
-- **Purpose:** 2.8" ILI9341 TFT display with XPT2046 touch
-- **Features:**
-  - Three screen types (Main, Settings, Simple)
-  - Touch input handling
-  - State-based rendering (only updates when needed)
-  - Coordinate mapping for touch calibration
-- **Usage:**
-  ```cpp
-  Display display;
-  display.begin();
-  DisplayState state = {...};
-  display.update(state);
-  if (display.handleTouch(state)) {
-      // State modified by touch
-  }
-  ```
+### User Interface
+- **Web Pages:** Home, Schedule, Temperature, Info, Logs, Console, Settings
+- **Dark Mode:** Automatic system preference detection + manual toggle
+- **Responsive Design:** Works on desktop and mobile browsers
+- **Auto-refresh:** Console updates every 2 seconds
 
 ---
 
-## Current Phase: Phase 1
+## Next Steps & Future Enhancements
 
-**Status:** ✓ Complete  
-**Modules:** Hardware drivers only  
-**Testing:** Use `src/main.cpp` Phase 1 test program
+**See [SCOPE.md](SCOPE.md) for detailed roadmap and feature specifications.**
 
-### Phase 1 Test Features
+### Priority Features:
 
-1. **Temperature Reading**
-   - Reads DS18B20 every 2 seconds
-   - Displays on TFT screen
-   - Logs to serial
+1. **WiFi Reconnection Fix** (Critical)
+   - Device currently stays in AP mode after WiFi loss
+   - Should automatically reconnect when WiFi becomes available
+   - Simple fix in [wifi_manager.cpp](src/network/wifi_manager.cpp)
 
-2. **Display Screens**
-   - Main: Shows temp, target, +/- buttons
-   - Settings: Mode selection (auto/on/off)
-   - Simple: Large temperature display
+2. **Multi-Output Environmental Control**
+   - Expand from 1 to 3 independent heating/lighting outputs
+   - Support for AC dimmer, SSR pulse control, and relay on/off
+   - Multiple DS18B20 sensors (assign per output)
+   - Independent scheduling per output
 
-3. **Touch Input**
-   - +/- buttons adjust target temperature
-   - Settings button opens mode selection
-   - Simple button shows large display
-   - Back button returns to main
+3. **Setup Wizard**
+   - Guided first-run configuration
+   - WiFi setup with network scanning
+   - MQTT configuration (optional)
+   - Sensor discovery and naming
+   - Output hardware configuration
 
-4. **Dimmer Control**
-   - Auto mode: Simple proportional control
-   - Manual on: 100% power
-   - Off mode: 0% power
+4. **Android App**
+   - mDNS device discovery
+   - Multi-device management
+   - Real-time monitoring and control
+   - Temperature graphs and alerts
 
-5. **Serial Commands**
-   ```
-   t         - Read temperature
-   d0-100    - Set dimmer power (e.g., d50 = 50%)
-   s         - Show system status
-   m         - Cycle through screens
-   ```
+### Testing Current Version
 
-### Testing Phase 1
+**Build and upload:**
+```bash
+pio run -t upload
+pio device monitor
+```
 
-1. **Upload firmware:**
-   ```bash
-   pio run -t upload
-   ```
+**Access web interface:**
+- Local network: `http://192.168.1.236`
+- mDNS hostname: `http://havoc.local`
+- AP mode (if WiFi fails): `http://192.168.4.1` (SSID: ReptileThermostat)
 
-2. **Open serial monitor:**
-   ```bash
-   pio device monitor
-   ```
-
-3. **Verify functionality:**
-   - [ ] Temperature readings appear
-   - [ ] Display shows current temp
-   - [ ] Touch +/- buttons work
-   - [ ] Screen switching works
-   - [ ] Dimmer responds to commands
-   - [ ] System runs stable
-
----
-
-## Next Phases
-
-### Phase 2: Network Stack (Planned)
-- WiFi Manager (connection, AP mode, mDNS)
-- MQTT Client (pub/sub, HA discovery)
-- Web Server (HTTP routes, API endpoints)
-- OTA Updater (manual + GitHub auto-update)
-
-### Phase 3: Control Logic (Planned)
-- PID Controller (pure algorithm)
-- Scheduler (time-based temperature control)
-- Thermostat (high-level coordinator)
-
-### Phase 4: Storage & UI (Planned)
-- Settings Manager (preferences persistence)
-- Logger (system event logging)
-- Web Pages (HTML generation)
-- TFT Screens (already in Phase 1)
-
-### Phase 5: Final Integration (Planned)
-- Slim down main.cpp to ~100 lines
-- Full system integration
-- Documentation
-- Performance testing
+**Verify functionality:**
+- Temperature readings update every 2 seconds
+- Web interface accessible on all pages
+- Dark mode toggle works
+- Console shows real-time events
+- Temperature graph displays 24-hour history
+- MQTT publishes to Home Assistant (if configured)
+- Schedule can be edited and saved
 
 ---
 
@@ -272,11 +228,11 @@ TFT Display (JC2432S028):
 
 ### Naming Conventions
 
-- **Classes:** PascalCase (e.g., `TemperatureSensor`)
-- **Functions:** camelCase (e.g., `readTemperature`)
+- **Functions:** snake_case with module prefix (e.g., `wifi_connect`, `temp_sensor_read`)
+- **Types:** PascalCase with _t suffix (e.g., `WiFiState_t`, `ConsoleEventType_t`)
 - **Variables:** camelCase (e.g., `currentTemp`)
 - **Constants:** UPPER_SNAKE_CASE (e.g., `TEMP_MIN_VALID`)
-- **Member variables:** m_prefix (e.g., `m_lastTemperature`)
+- **Static variables:** camelCase with static keyword (e.g., `static int eventCount`)
 
 ---
 
@@ -342,27 +298,25 @@ TFT Display (JC2432S028):
 
 ---
 
-## Migration from v1.3.3
+## Known Issues
 
-See `MIGRATION_CHECKLIST.md` for detailed step-by-step migration process.
+### WiFi Reconnection Bug
+**Issue:** Device does not automatically reconnect to WiFi after connection loss. It stays in AP mode even when WiFi becomes available again.
 
-**Quick Summary:**
-1. Phase 1: Hardware drivers (current)
-2. Phase 2: Network stack
-3. Phase 3: Control logic
-4. Phase 4: Storage & UI
-5. Phase 5: Final integration
+**Workaround:** Power cycle the device.
+
+**Fix:** See [SCOPE.md - Known Issues](SCOPE.md#1-wifi-reconnection-bug) for detailed fix plan.
 
 ---
 
 ## Contributing
 
 When adding features:
-1. Follow module design principles
+1. Follow module design principles (see [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md))
 2. Add documentation to header files
 3. Test independently before integration
-4. Update this README
-5. Update MIGRATION_CHECKLIST.md
+4. Update this README and SCOPE.md
+5. Commit with descriptive messages
 
 ---
 
@@ -375,12 +329,14 @@ Open source - feel free to modify and share!
 ## Support
 
 For issues or questions:
-1. Check MIGRATION_CHECKLIST.md for common problems
+1. Check [SCOPE.md](SCOPE.md) for known issues and workarounds
 2. Review module documentation in header files
-3. Test modules independently
-4. Check serial output for error messages
+3. Check [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for architecture details
+4. Check serial output and `/console` page for debug messages
+5. Open an issue on GitHub
 
 ---
 
-**Project Status:** Phase 1 Complete ✓  
-**Next Step:** Begin Phase 2 (Network Stack)
+**Project Status:** Modular refactoring complete ✓
+**Current Version:** v1.9.0
+**Next Steps:** See [SCOPE.md](SCOPE.md) for roadmap

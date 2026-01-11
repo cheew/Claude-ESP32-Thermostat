@@ -5,6 +5,7 @@
 
 #include "mqtt_manager.h"
 #include "console.h"
+#include "output_manager.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
@@ -126,13 +127,23 @@ bool mqtt_connect(void) {
     if (mqttClient.connect(MQTT_CLIENT_ID, user.c_str(), password.c_str())) {
         Serial.println(" connected");
         currentState = MQTT_STATE_CONNECTED;
-        
-        // Subscribe to command topics
+
+        // Subscribe to command topics for all 3 outputs
+        for (int i = 1; i <= 3; i++) {
+            char setTempTopicOut[80];
+            char modeSetTopicOut[80];
+            snprintf(setTempTopicOut, sizeof(setTempTopicOut), "%s/output%d/setpoint/set", baseTopic, i);
+            snprintf(modeSetTopicOut, sizeof(modeSetTopicOut), "%s/output%d/mode/set", baseTopic, i);
+            mqttClient.subscribe(setTempTopicOut);
+            mqttClient.subscribe(modeSetTopicOut);
+        }
+
+        // Also subscribe to legacy topics for backwards compatibility
         mqttClient.subscribe(setTempTopic);
         mqttClient.subscribe(modeSetTopic);
-        
-        Serial.println("[MQTT] Subscribed to command topics");
-        
+
+        Serial.println("[MQTT] Subscribed to command topics (3 outputs + legacy)");
+
         return true;
     } else {
         Serial.print(" failed, rc=");
@@ -264,77 +275,151 @@ void mqtt_publish_status_extended(float temperature, float setpoint,
 }
 
 /**
- * Send Home Assistant auto-discovery
+ * Publish all 3 outputs status (multi-output)
+ */
+void mqtt_publish_all_outputs(int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds) {
+    if (!mqttClient.connected()) return;
+
+    // Publish each output individually
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (!output) continue;
+
+        int outputNum = i + 1;
+        char topicBuf[80];
+
+        // Temperature topic
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/temperature", baseTopic, outputNum);
+        char tempStr[8];
+        snprintf(tempStr, sizeof(tempStr), "%.1f", output->currentTemp);
+        mqttClient.publish(topicBuf, tempStr, true);
+
+        // Setpoint topic
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/setpoint", baseTopic, outputNum);
+        char setpointStr[8];
+        snprintf(setpointStr, sizeof(setpointStr), "%.1f", output->targetTemp);
+        mqttClient.publish(topicBuf, setpointStr, true);
+
+        // State topic (heating/idle)
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/state", baseTopic, outputNum);
+        mqttClient.publish(topicBuf, output->heating ? "heating" : "idle", true);
+
+        // Mode topic (map to HA modes)
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/mode", baseTopic, outputNum);
+        const char* haMode = "off";
+        if (output->controlMode != CONTROL_MODE_OFF && output->enabled) {
+            haMode = "heat";
+        }
+        mqttClient.publish(topicBuf, haMode, true);
+
+        // Power topic
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/power", baseTopic, outputNum);
+        char powerStr[8];
+        snprintf(powerStr, sizeof(powerStr), "%d", output->currentPower);
+        mqttClient.publish(topicBuf, powerStr, true);
+
+        // Status topic (JSON with all data)
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/status", baseTopic, outputNum);
+        StaticJsonDocument<384> doc;
+        doc["temperature"] = round(output->currentTemp * 10) / 10.0;
+        doc["setpoint"] = output->targetTemp;
+        doc["heating"] = output->heating;
+        doc["mode"] = output_manager_get_mode_name(output->controlMode);
+        doc["power"] = output->currentPower;
+        doc["enabled"] = output->enabled;
+        doc["name"] = output->name;
+
+        // Only include system info on output 1
+        if (i == 0) {
+            doc["wifi_rssi"] = wifiRssi;
+            doc["free_heap"] = freeHeap;
+            doc["uptime"] = uptimeSeconds;
+        }
+
+        char jsonBuf[384];
+        serializeJson(doc, jsonBuf);
+        mqttClient.publish(topicBuf, jsonBuf, true);
+    }
+
+    console_add_event(CONSOLE_EVENT_MQTT, "MQTT PUB: All 3 outputs published");
+}
+
+/**
+ * Send Home Assistant auto-discovery (Multi-Output)
  */
 void mqtt_send_ha_discovery(const char* devName, const char* devId) {
     if (!mqttClient.connected()) {
         Serial.println("[MQTT] Cannot send HA discovery: not connected");
         return;
     }
-    
+
     // Store device info
     strncpy(deviceName, devName, sizeof(deviceName) - 1);
     strncpy(deviceId, devId, sizeof(deviceId) - 1);
-    
-    Serial.println("[MQTT] Sending Home Assistant discovery...");
-    
-    // Temperature sensor
-    StaticJsonDocument<512> tempDoc;
-    tempDoc["name"] = String(deviceName) + " Temperature";
-    tempDoc["state_topic"] = tempTopic;
-    tempDoc["unit_of_measurement"] = "°C";
-    tempDoc["device_class"] = "temperature";
-    tempDoc["unique_id"] = String(deviceId) + "_temp";
-    
-    JsonObject device = tempDoc.createNestedObject("device");
-    device["identifiers"][0] = deviceId;
-    device["name"] = deviceName;
-    device["model"] = "ESP32 Thermostat";
-    device["manufacturer"] = "DIY";
-    
-    char tempPayload[512];
-    serializeJson(tempDoc, tempPayload);
-    
-    char tempDiscTopic[128];
-    snprintf(tempDiscTopic, sizeof(tempDiscTopic), 
-             "%s/sensor/%s_temp/config", HA_DISCOVERY_PREFIX, deviceId);
-    mqttClient.publish(tempDiscTopic, tempPayload, true);
-    
-    // Climate entity
-    StaticJsonDocument<768> climateDoc;
-    climateDoc["name"] = deviceName;
-    climateDoc["mode_state_topic"] = modeTopic;
-    climateDoc["mode_command_topic"] = modeSetTopic;
-    climateDoc["temperature_state_topic"] = tempTopic;
-    climateDoc["temperature_command_topic"] = setTempTopic;
-    climateDoc["current_temperature_topic"] = tempTopic;
-    climateDoc["temp_step"] = 0.5;
-    climateDoc["min_temp"] = 15;
-    climateDoc["max_temp"] = 45;
-    climateDoc["unique_id"] = String(deviceId) + "_climate";
-    
-    JsonArray modes = climateDoc.createNestedArray("modes");
-    modes.add("off");
-    modes.add("heat");
-    
-    JsonObject climateDevice = climateDoc.createNestedObject("device");
-    climateDevice["identifiers"][0] = deviceId;
-    climateDevice["name"] = deviceName;
-    climateDevice["model"] = "ESP32 Thermostat";
-    climateDevice["manufacturer"] = "DIY";
-    
-    char climatePayload[768];
-    serializeJson(climateDoc, climatePayload);
-    
-    char climateDiscTopic[128];
-    snprintf(climateDiscTopic, sizeof(climateDiscTopic),
-             "%s/climate/%s/config", HA_DISCOVERY_PREFIX, deviceId);
-    mqttClient.publish(climateDiscTopic, climatePayload, true);
+
+    Serial.println("[MQTT] Sending Home Assistant discovery (multi-output)...");
+
+    // Create 3 climate entities (one per output)
+    for (int i = 1; i <= 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i - 1);
+        if (!output) continue;
+
+        char topicBuf[128];
+        char payloadBuf[768];
+
+        // Build climate discovery config
+        StaticJsonDocument<768> doc;
+        doc["name"] = String(output->name) + " (" + String(deviceName) + ")";
+
+        // Topics for this output
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/mode", baseTopic, i);
+        doc["mode_state_topic"] = topicBuf;
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/mode/set", baseTopic, i);
+        doc["mode_command_topic"] = topicBuf;
+
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/temperature", baseTopic, i);
+        doc["current_temperature_topic"] = topicBuf;
+
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/setpoint", baseTopic, i);
+        doc["temperature_state_topic"] = topicBuf;
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/setpoint/set", baseTopic, i);
+        doc["temperature_command_topic"] = topicBuf;
+
+        doc["temp_step"] = 0.5;
+        doc["min_temp"] = 15;
+        doc["max_temp"] = 45;
+        doc["unique_id"] = String(deviceId) + "_output" + String(i);
+
+        JsonArray modes = doc.createNestedArray("modes");
+        modes.add("off");
+        modes.add("heat");
+
+        // Device info (groups all entities under one device)
+        JsonObject device = doc.createNestedObject("device");
+        device["identifiers"][0] = deviceId;
+        device["name"] = deviceName;
+        device["model"] = "ESP32 Multi-Output Thermostat";
+        device["manufacturer"] = "DIY";
+        device["sw_version"] = "2.0.0";
+
+        serializeJson(doc, payloadBuf);
+
+        // Publish discovery config
+        snprintf(topicBuf, sizeof(topicBuf), "%s/climate/%s_output%d/config",
+                 HA_DISCOVERY_PREFIX, deviceId, i);
+        mqttClient.publish(topicBuf, payloadBuf, true);
+
+        delay(50); // Small delay between publishes
+    }
+
+    // System diagnostic sensors (attached to device, not specific output)
 
     // WiFi RSSI sensor
     StaticJsonDocument<512> rssiDoc;
     rssiDoc["name"] = String(deviceName) + " WiFi Signal";
-    rssiDoc["state_topic"] = statusTopic;
+    char statusTopic1[80];
+    snprintf(statusTopic1, sizeof(statusTopic1), "%s/output1/status", baseTopic);
+    rssiDoc["state_topic"] = statusTopic1;
     rssiDoc["value_template"] = "{{ value_json.wifi_rssi }}";
     rssiDoc["unit_of_measurement"] = "dBm";
     rssiDoc["device_class"] = "signal_strength";
@@ -355,7 +440,7 @@ void mqtt_send_ha_discovery(const char* devName, const char* devId) {
     // Free heap sensor
     StaticJsonDocument<512> heapDoc;
     heapDoc["name"] = String(deviceName) + " Free Memory";
-    heapDoc["state_topic"] = statusTopic;
+    heapDoc["state_topic"] = statusTopic1;
     heapDoc["value_template"] = "{{ value_json.free_heap }}";
     heapDoc["unit_of_measurement"] = "bytes";
     heapDoc["unique_id"] = String(deviceId) + "_heap";
@@ -376,7 +461,7 @@ void mqtt_send_ha_discovery(const char* devName, const char* devId) {
     // Uptime sensor
     StaticJsonDocument<512> uptimeDoc;
     uptimeDoc["name"] = String(deviceName) + " Uptime";
-    uptimeDoc["state_topic"] = statusTopic;
+    uptimeDoc["state_topic"] = statusTopic1;
     uptimeDoc["value_template"] = "{{ value_json.uptime }}";
     uptimeDoc["unit_of_measurement"] = "s";
     uptimeDoc["unique_id"] = String(deviceId) + "_uptime";
@@ -394,7 +479,8 @@ void mqtt_send_ha_discovery(const char* devName, const char* devId) {
              "%s/sensor/%s_uptime/config", HA_DISCOVERY_PREFIX, deviceId);
     mqttClient.publish(uptimeDiscTopic, uptimePayload, true);
 
-    Serial.println("[MQTT] Home Assistant discovery sent (5 entities)");
+    Serial.println("[MQTT] Home Assistant discovery sent (3 climates + 3 diagnostics)");
+    console_add_event(CONSOLE_EVENT_MQTT, "MQTT: HA discovery published");
 }
 
 /**
@@ -457,13 +543,44 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     memcpy(message, payload, length);
     message[length] = '\0';
-    
+
     Serial.print("[MQTT] Message on ");
     Serial.print(topic);
     Serial.print(": ");
     Serial.println(message);
-    
-    // Route to appropriate callback
+
+    // Check for multi-output topics (format: base/output1/setpoint/set)
+    for (int i = 1; i <= 3; i++) {
+        char setTempTopicOut[80];
+        char modeSetTopicOut[80];
+        snprintf(setTempTopicOut, sizeof(setTempTopicOut), "%s/output%d/setpoint/set", baseTopic, i);
+        snprintf(modeSetTopicOut, sizeof(modeSetTopicOut), "%s/output%d/mode/set", baseTopic, i);
+
+        if (strcmp(topic, setTempTopicOut) == 0) {
+            // Setpoint command for specific output
+            float target = atof(message);
+            if (target >= 15.0 && target <= 45.0) {
+                output_manager_set_target(i - 1, target);
+                output_manager_save_config();
+                console_add_event_f(CONSOLE_EVENT_MQTT, "MQTT SET: Output %d target = %.1f", i, target);
+            }
+            return;
+        } else if (strcmp(topic, modeSetTopicOut) == 0) {
+            // Mode command for specific output
+            ControlMode_t mode = CONTROL_MODE_OFF;
+            if (strcmp(message, "heat") == 0 || strcmp(message, "on") == 0) {
+                mode = CONTROL_MODE_PID;
+            } else if (strcmp(message, "off") == 0) {
+                mode = CONTROL_MODE_OFF;
+            }
+            output_manager_set_mode(i - 1, mode);
+            output_manager_save_config();
+            console_add_event_f(CONSOLE_EVENT_MQTT, "MQTT SET: Output %d mode = %s", i, message);
+            return;
+        }
+    }
+
+    // Legacy topic support (applies to Output 1)
     if (strcmp(topic, setTempTopic) == 0) {
         if (setpointCallback != NULL) {
             setpointCallback(topic, message);

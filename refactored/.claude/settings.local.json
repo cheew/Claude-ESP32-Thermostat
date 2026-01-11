@@ -10,7 +10,14 @@
       "Bash(git push:*)",
       "Bash(curl:*)",
       "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://192.168.1.236/api/info'' | ConvertTo-Json\")",
-      "Bash(timeout 25:*)"
+      "Bash(timeout 25:*)",
+      "Bash(platformio run:*)",
+      "Bash(where:*)",
+      "Bash(python -m platformio:*)",
+      "Bash(cmd.exe /c \"dir /b C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe 2>nul\")",
+      "Bash(cmd /c \"C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe --version\")",
+      "Bash(python3 -m platformio run:*)",
+      "Bash(if exist nul del /f nul)"
     ]
   }
 }

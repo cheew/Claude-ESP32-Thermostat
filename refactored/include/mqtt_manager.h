@@ -118,6 +118,16 @@ void mqtt_publish_status_extended(float temperature, float setpoint,
                                    int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds);
 
 /**
+ * Publish all outputs status with system info (Multi-Output)
+ * Publishes temperature, setpoint, state, mode, and power for all 3 outputs
+ * Topics: baseTopic/output1/..., baseTopic/output2/..., baseTopic/output3/...
+ * @param wifiRssi WiFi signal strength (dBm)
+ * @param freeHeap Free heap memory (bytes)
+ * @param uptimeSeconds System uptime (seconds)
+ */
+void mqtt_publish_all_outputs(int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds);
+
+/**
  * Send Home Assistant auto-discovery messages
  * Creates climate entity and temperature sensor
  * @param deviceName Friendly name for the device

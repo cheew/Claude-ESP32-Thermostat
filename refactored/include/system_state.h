@@ -24,7 +24,7 @@ typedef struct {
     float currentTemp;      // Current temperature reading
     float targetTemp;       // Target temperature setpoint
     bool heating;           // true if actively heating
-    char mode[8];          // Operating mode (auto/on/off)
+    char mode[12];         // Operating mode (auto/on/off/manual/onoff/schedule)
     int power;             // Power output percentage (0-100)
 } SystemState_t;
 

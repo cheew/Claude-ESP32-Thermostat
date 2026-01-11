@@ -16,6 +16,11 @@
  * - System logging with 20-entry circular buffer
  * - Mobile-responsive web interface
  * 
+ * Changelog v1.3.3:
+ * - Fixed mobile responsiveness on schedule page
+ * - Day buttons now wrap properly on small screens
+ * - Reduced day button font size for mobile
+ * 
  * Changelog v1.3.2:
  * - Fixed mDNS hostname bug (removed extra hyphen)
  * - Added hostname sanitization (removes invalid characters)
@@ -48,23 +53,21 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <PubSubClient.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
-#include <RBDdimmer.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <ESPmDNS.h>
 #include <Update.h>
 
-// Pin definitions
-#define ONE_WIRE_BUS 4    // GPIO4 (D4)
-#define DIMMER_PIN 5      // GPIO5 - PWM control pin for AC dimmer
-#define ZEROCROSS_PIN 27  // GPIO27 - Zero-cross detection pin (was 18, moved for TFT)
+// Hardware modules
+#include "temp_sensor.h"
+#include "dimmer_control.h"
+
+// Pin definitions (hardware configuration in modules)
 
 // Firmware version
-#define FIRMWARE_VERSION "1.3.2"
+#define FIRMWARE_VERSION "1.3.3"
 
 // GitHub repository for auto-updates
 const char* github_user = "cheew";
@@ -139,13 +142,6 @@ void drawMainScreen();
 void drawSettingsScreen();
 void drawSimpleScreen();
 void checkTouch();
-
-// Temperature sensor setup
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
-
-// AC Dimmer setup
-dimmerLamp dimmer(DIMMER_PIN, ZEROCROSS_PIN);
 
 // TFT Display setup
 TFT_eSPI tft = TFT_eSPI();
@@ -230,8 +226,7 @@ void setup() {
   addLog("System boot - v" + String(FIRMWARE_VERSION));
   
   // Initialize AC dimmer
-  dimmer.begin(NORMAL_MODE, ON);
-  dimmer.setPower(0);
+  dimmer_init();
   
   // Load saved settings
   preferences.begin("thermostat", false);
@@ -259,7 +254,7 @@ void setup() {
   }
   
   // Initialize temperature sensor
-  sensors.begin();
+  temp_sensor_init();
   
   // Setup time (NTP) if connected to WiFi
   if (WiFi.status() == WL_CONNECTED && !apMode) {
@@ -497,10 +492,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void readTemperature() {
-  sensors.requestTemperatures();
-  float temp = sensors.getTempCByIndex(0);
-  
-  if (temp != DEVICE_DISCONNECTED_C && temp > -50 && temp < 100) {
+  float temp = temp_sensor_read();
+
+  if (temp_sensor_is_valid(temp)) {
     if (abs(temp - currentTemp) > 0.1) {  // Only update if changed significantly
       currentTemp = temp;
       displayNeedsUpdate = true;
@@ -541,7 +535,7 @@ void updatePID() {
     previousError = error;
     
     // Set dimmer power
-    dimmer.setPower(powerOutput);
+    dimmer_set_power(powerOutput);
     heatingState = (powerOutput > 0);
     
     Serial.print("PID: Err=");
@@ -557,11 +551,11 @@ void updatePID() {
     
   } else if (mode == "on") {
     powerOutput = 100;
-    dimmer.setPower(100);
+    dimmer_set_power(100);
     heatingState = true;
   } else {  // mode == "off"
     powerOutput = 0;
-    dimmer.setPower(0);
+    dimmer_set_power(0);
     heatingState = false;
     integral = 0;
     previousError = 0;
@@ -1847,13 +1841,13 @@ void handleSchedule() {
     
     // Days
     html += "<div><label>Active Days:</label>";
-    html += "<div style='display:flex;gap:5px;margin-top:5px'>";
+    html += "<div style='display:flex;flex-wrap:wrap;gap:5px;margin-top:5px'>";
     String days = "SMTWTFS";
     String dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     for (int d = 0; d < 7; d++) {
       bool checked = schedule[i].days.indexOf(days[d]) >= 0;
-      html += "<label style='flex:1;text-align:center;padding:8px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
-      html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer'>";
+      html += "<label style='min-width:40px;flex:1;max-width:60px;text-align:center;padding:8px 4px;background:" + String(checked ? "#4CAF50" : "#ddd") + ";";
+      html += "color:" + String(checked ? "white" : "#666") + ";border-radius:5px;cursor:pointer;font-size:12px'>";
       html += "<input type='checkbox' name='day" + String(i) + "_" + String(d) + "' " + String(checked ? "checked" : "") + " ";
       html += "style='display:none' onchange='this.parentElement.style.background=this.checked?\"#4CAF50\":\"#ddd\";";
       html += "this.parentElement.style.color=this.checked?\"white\":\"#666\"'>";
