@@ -9,7 +9,8 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(curl:*)",
-      "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://192.168.1.236/api/info'' | ConvertTo-Json\")"
+      "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://192.168.1.236/api/info'' | ConvertTo-Json\")",
+      "Bash(timeout 25:*)"
     ]
   }
 }

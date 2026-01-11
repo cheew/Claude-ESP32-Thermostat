@@ -7,6 +7,7 @@
 #include "scheduler.h"
 #include "logger.h"
 #include "temp_history.h"
+#include "console.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -55,11 +56,13 @@ static void handleSchedule(void);
 static void handleHistoryPage(void);
 static void handleInfo(void);
 static void handleLogs(void);
+static void handleConsole(void);
 static void handleSettings(void);
 static void handleStatus(void);
 static void handleInfo_API(void);
 static void handleLogs_API(void);
 static void handleHistory(void);
+static void handleConsoleEvents(void);
 static void handleSet(void);
 static void handleControl(void);
 static void handleSaveSettings(void);
@@ -87,13 +90,15 @@ void webserver_init(void) {
     server.on("/history", handleHistoryPage);
     server.on("/info", handleInfo);
     server.on("/logs", handleLogs);
+    server.on("/console", handleConsole);
     server.on("/settings", handleSettings);
-    
+
     // API endpoints
     server.on("/api/status", handleStatus);
     server.on("/api/info", handleInfo_API);
     server.on("/api/logs", handleLogs_API);
     server.on("/api/history", handleHistory);
+    server.on("/api/console", handleConsoleEvents);
     server.on("/api/set", HTTP_POST, handleSet);
     server.on("/api/control", HTTP_POST, handleControl);
     server.on("/api/save-settings", HTTP_POST, handleSaveSettings);
@@ -102,10 +107,16 @@ void webserver_init(void) {
     server.on("/api/check-update", handleCheckUpdate);
     server.on("/api/auto-update", HTTP_POST, handleAutoUpdate);
     
+    // Console routes
+    server.on("/api/console-clear", HTTP_POST, []() {
+        console_clear();
+        server.send(200, "text/plain", "OK");
+    });
+
     // OTA update routes
     server.on("/update", handleUpdate);
     server.on("/api/upload", HTTP_POST, handleUploadDone, handleUpload);
-    
+
     server.begin();
     Serial.println("[WebServer] Server started on port 80");
 }
@@ -520,6 +531,88 @@ static void handleLogs(void) {
     
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
+}
+
+/**
+ * Handle console page
+ */
+static void handleConsole(void) {
+    String html = webserver_get_html_header("Live Console", "console");
+
+    html += "<h2>System Console</h2>";
+    html += "<div class='info-box'>Real-time system events, MQTT activity, and debug messages</div>";
+
+    html += "<div style='margin-bottom:15px'>";
+    html += "<button onclick='refreshConsole()' class='btn-secondary' style='margin-right:10px'>Refresh</button>";
+    html += "<button onclick='clearConsole()' class='btn-secondary' style='margin-right:10px'>Clear</button>";
+    html += "<label style='margin-left:20px'><input type='checkbox' id='autoRefresh' checked> Auto-refresh (2s)</label>";
+    html += "</div>";
+
+    html += "<div id='console-output' style='background:#1e1e1e;color:#d4d4d4;font-family:\"Courier New\",monospace;font-size:13px;padding:15px;border-radius:5px;height:600px;overflow-y:auto;'>";
+    html += "<div style='color:#888'>Loading console...</div>";
+    html += "</div>";
+
+    html += "<script>";
+    html += "let autoRefreshTimer=null;";
+    html += "function refreshConsole(){";
+    html += "fetch('/api/console').then(r=>r.json()).then(data=>{";
+    html += "const out=document.getElementById('console-output');out.innerHTML='';";
+    html += "if(data.events&&data.events.length>0){";
+    html += "data.events.forEach(evt=>{";
+    html += "const div=document.createElement('div');div.style.marginBottom='2px';";
+    html += "let color='#d4d4d4';";
+    html += "if(evt.type==='ERROR')color='#f48771';";
+    html += "else if(evt.type==='MQTT')color='#4ec9b0';";
+    html += "else if(evt.type==='WIFI')color='#dcdcaa';";
+    html += "else if(evt.type==='SYSTEM')color='#569cd6';";
+    html += "else if(evt.type==='TEMP')color='#ce9178';";
+    html += "else if(evt.type==='PID')color='#c586c0';";
+    html += "div.innerHTML='<span style=\"color:'+color+'\">['+evt.type+']</span> '+evt.message;";
+    html += "out.appendChild(div);";
+    html += "});";
+    html += "out.scrollTop=out.scrollHeight;";
+    html += "}else{out.innerHTML='<div style=\"color:#888\">No console events yet...</div>';}";
+    html += "}).catch(err=>console.error('Error:',err));}";
+    html += "function clearConsole(){";
+    html += "if(confirm('Clear all console events?')){";
+    html += "fetch('/api/console-clear',{method:'POST'}).then(()=>refreshConsole());";
+    html += "}}";
+    html += "function toggleAutoRefresh(){";
+    html += "if(document.getElementById('autoRefresh').checked){";
+    html += "autoRefreshTimer=setInterval(refreshConsole,2000);";
+    html += "}else{if(autoRefreshTimer)clearInterval(autoRefreshTimer);}}";
+    html += "document.getElementById('autoRefresh').addEventListener('change',toggleAutoRefresh);";
+    html += "refreshConsole();toggleAutoRefresh();";
+    html += "</script>";
+
+    html += webserver_get_html_footer(millis() / 1000);
+    server.send(200, "text/html", html);
+}
+
+/**
+ * Handle console events API
+ */
+static void handleConsoleEvents(void) {
+    DynamicJsonDocument doc(4096);
+    JsonArray events = doc.createNestedArray("events");
+
+    int count = console_get_count();
+    for (int i = 0; i < count; i++) {
+        const char* event = console_get_event(i);
+        ConsoleEventType_t type = console_get_event_type(i);
+
+        if (event != nullptr) {
+            JsonObject evt = events.createNestedObject();
+            evt["message"] = event;
+            evt["type"] = console_get_type_name(type);
+        }
+    }
+
+    doc["count"] = count;
+
+    String output;
+    serializeJson(doc, output);
+    server.send(200, "application/json", output);
 }
 
 /**
@@ -1164,6 +1257,7 @@ static String buildNavBar(const char* activePage) {
     nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
     nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";
     nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";
+    nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";
     nav += "</div>";
     

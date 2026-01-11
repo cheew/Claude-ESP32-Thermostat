@@ -4,6 +4,7 @@
  */
 
 #include "mqtt_manager.h"
+#include "console.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
@@ -171,10 +172,12 @@ MQTTState_t mqtt_get_state(void) {
  */
 void mqtt_publish_temperature(float temperature) {
     if (!mqttClient.connected()) return;
-    
+
     char tempStr[8];
     snprintf(tempStr, sizeof(tempStr), "%.1f", temperature);
     mqttClient.publish(tempTopic, tempStr, true);
+
+    console_add_event_f(CONSOLE_EVENT_MQTT, "MQTT PUB: %s = %s", tempTopic, tempStr);
 }
 
 /**

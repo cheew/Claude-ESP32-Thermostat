@@ -33,9 +33,10 @@
 // Include utilities (Phase 6)
 #include "logger.h"
 #include "temp_history.h"
+#include "console.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "1.7.0"
+#define FIRMWARE_VERSION "1.8.0"
 
 // Timing
 unsigned long lastTempRead = 0;
@@ -56,12 +57,14 @@ void setup() {
     Serial.begin(115200);
     bootTime = millis();
 
-    // Initialize logger and history
+    // Initialize logger, history, and console
     logger_init(bootTime);
     temp_history_init(bootTime);
+    console_init();
 
     Serial.println("=== ESP32 Reptile Thermostat v" FIRMWARE_VERSION " ===");
     logger_add("System boot - v" FIRMWARE_VERSION);
+    console_add_event(CONSOLE_EVENT_SYSTEM, "System boot - v" FIRMWARE_VERSION);
     
     // Initialize TFT display
     tft_init();
