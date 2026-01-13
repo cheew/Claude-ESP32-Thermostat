@@ -4,7 +4,6 @@
  */
 
 #include "web_server.h"
-#include "scheduler.h"
 #include "logger.h"
 #include "temp_history.h"
 #include "console.h"
@@ -42,10 +41,8 @@ static char networkIP[16] = "";
 // Logging (deprecated - using logger module now)
 #define MAX_LOGS 20
 
-// Schedule data (stored as void* to avoid circular dependency)
-static bool scheduleEnabled = false;
-static int scheduleSlotCount = 0;
-static void* scheduleSlots = NULL;
+// Schedule data (legacy - now handled per-output in output_manager)
+// Keeping variables for backward compatibility with old API endpoints
 
 // GitHub auto-update configuration
 static const char* GITHUB_USER = "cheew";
@@ -68,7 +65,6 @@ static void handleConsoleEvents(void);
 static void handleSet(void);
 static void handleControl(void);
 static void handleSaveSettings(void);
-static void handleSaveSchedule(void);
 static void handleRestart(void);
 static void handleUpdate(void);
 static void handleUpload(void);
@@ -120,7 +116,10 @@ void webserver_init(void) {
         html += "document.getElementById('out-name').value=d.name;";
         html += "document.getElementById('out-enabled').checked=d.enabled;";
         html += "document.getElementById('out-sensor').value=d.sensor;";
+        html += "handleSensorChange(d.sensor);";
         html += "document.getElementById('out-target').value=d.target;";
+        html += "document.getElementById('out-target-slider').value=d.target;";
+        html += "document.getElementById('temp-display').innerText=parseFloat(d.target).toFixed(1);";
         html += "document.getElementById('out-mode').value=d.mode.toLowerCase();";
         html += "document.getElementById('out-power').value=d.manualPower;";
         html += "document.getElementById('out-kp').value=d.pid.kp;";
@@ -145,7 +144,50 @@ void webserver_init(void) {
         html += "fetch('/api/output/'+currentOutput+'/control',{method:'POST',";
         html += "headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})";
         html += ".then(()=>alert('Control updated!'));}";
-        html += "showOutput(1);";
+
+        // Slider functions
+        html += "function updateTempDisplay(val){";
+        html += "document.getElementById('temp-display').innerText=parseFloat(val).toFixed(1);";
+        html += "document.getElementById('out-target').value=val;}";
+
+        html += "function toggleSafeZone(override){";
+        html += "let slider=document.getElementById('out-target-slider');";
+        html += "let input=document.getElementById('out-target');";
+        html += "if(override){";
+        html += "slider.max=45;input.max=45;";
+        html += "console.log('⚠️ Safe zone overridden - extended range to 45°C');}else{";
+        html += "slider.max=35;input.max=35;";
+        html += "if(parseFloat(slider.value)>35){slider.value=35;updateTempDisplay(35);}";
+        html += "}}";
+
+        // Sensor type change handler
+        html += "function handleSensorChange(val){";
+        html += "let tempControl=document.getElementById('temp-control-section');";
+        html += "let infoBox=document.getElementById('sensor-type-info');";
+        html += "let modeSelect=document.getElementById('out-mode');";
+        html += "if(val==='none'){";
+        html += "tempControl.style.display='none';";
+        html += "infoBox.style.display='block';";
+        html += "infoBox.innerHTML='ℹ️ <strong>No Sensor Mode:</strong> Only Schedule and Manual modes available. Use for lights, foggers, or misters.';";
+        html += "modeSelect.querySelector('option[value=\"pid\"]').disabled=true;";
+        html += "modeSelect.querySelector('option[value=\"onoff\"]').disabled=true;";
+        html += "if(modeSelect.value==='pid'||modeSelect.value==='onoff'){modeSelect.value='manual';}";
+        html += "}else if(val==='humidity'){";
+        html += "tempControl.style.display='block';";
+        html += "document.querySelector('label[for=\"temp-display\"]').innerHTML='<strong>Target Humidity: <span id=\"temp-display\">50.0</span>%</strong>';";
+        html += "infoBox.style.display='block';";
+        html += "infoBox.innerHTML='⚠️ <strong>Humidity Mode:</strong> Coming soon! Humidity sensors not yet supported.';";
+        html += "modeSelect.querySelector('option[value=\"pid\"]').disabled=false;";
+        html += "modeSelect.querySelector('option[value=\"onoff\"]').disabled=false;";
+        html += "}else{";
+        html += "tempControl.style.display='block';";
+        html += "infoBox.style.display='none';";
+        html += "document.querySelector('label[for=\"temp-display\"]').innerHTML='<strong>Target Temperature: <span id=\"temp-display\">28.0</span>°C</strong>';";
+        html += "modeSelect.querySelector('option[value=\"pid\"]').disabled=false;";
+        html += "modeSelect.querySelector('option[value=\"onoff\"]').disabled=false;";
+        html += "}}";
+
+        html += "showOutput(1)";
         html += "</script>";
 
         // Configuration form
@@ -155,7 +197,9 @@ void webserver_init(void) {
         html += "<div style='margin:10px 0'><label><input type='checkbox' id='out-enabled'> Enabled</label></div>";
         html += "<div style='margin:10px 0'><label>Name: <input type='text' id='out-name' style='width:300px'></label></div>";
 
-        html += "<div style='margin:10px 0'><label>Sensor: <select id='out-sensor' style='width:300px'>";
+        html += "<div style='margin:10px 0'><label>Sensor: <select id='out-sensor' style='width:300px' onchange='handleSensorChange(this.value)'>";
+        html += "<option value='none'>No Sensor (Time/Manual Only)</option>";
+        html += "<option value='humidity'>Humidity Sensor (Future)</option>";
         int sensorCount = sensor_manager_get_count();
         for (int i = 0; i < sensorCount; i++) {
             const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
@@ -164,13 +208,30 @@ void webserver_init(void) {
             }
         }
         html += "</select></label></div>";
+        html += "<div id='sensor-type-info' style='margin:10px 0;padding:10px;background:#fff3cd;border-radius:5px;display:none'></div>";
 
         html += "<div id='device-info' style='margin:10px 0;padding:10px;background:#e3f2fd;border-radius:5px'></div>";
 
         html += "<button onclick='saveConfig()' style='margin:10px 5px 10px 0;padding:10px 20px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer'>Save Configuration</button>";
 
         html += "<h3>Control Settings</h3>";
-        html += "<div style='margin:10px 0'><label>Target Temperature (°C): <input type='number' id='out-target' step='0.5' min='15' max='45' style='width:100px'></label></div>";
+
+        // Target temperature with slider and safe zone override (can be hidden for "No Sensor" mode)
+        html += "<div id='temp-control-section'>";
+        html += "<div style='margin:10px 0'>";
+        html += "<label style='display:block;margin-bottom:5px' for='temp-display'><strong>Target Temperature: <span id='temp-display'>28.0</span>°C</strong></label>";
+        html += "<input type='range' id='out-target-slider' min='15' max='35' step='0.5' value='28' ";
+        html += "style='width:100%;max-width:400px' ";
+        html += "oninput='updateTempDisplay(this.value)'>";
+        html += "<div style='display:flex;justify-content:space-between;max-width:400px;font-size:12px;color:#666'>";
+        html += "<span>15°C</span><span style='color:#4CAF50;font-weight:bold'>Safe Zone (15-35°C)</span><span>35°C</span></div>";
+        html += "<label style='margin-top:10px;display:flex;align-items:center;gap:8px;color:#ff9800;font-weight:bold'>";
+        html += "<input type='checkbox' id='override-safe' onchange='toggleSafeZone(this.checked)' style='width:auto'>";
+        html += "<span>⚠️ Override Safe Zone (15-45°C)</span></label>";
+        html += "<input type='number' id='out-target' step='0.5' min='15' max='35' value='28' style='display:none'>";
+        html += "</div>";
+        html += "</div>";
+
         html += "<div style='margin:10px 0'><label>Mode: <select id='out-mode' style='width:200px'>";
         html += "<option value='off'>Off</option>";
         html += "<option value='manual'>Manual</option>";
@@ -182,12 +243,15 @@ void webserver_init(void) {
 
         html += "<button onclick='saveControl()' style='margin:10px 5px 10px 0;padding:10px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer'>Apply Control</button>";
 
-        html += "<h3>PID Tuning</h3>";
+        // PID Tuning - collapsible section
+        html += "<h3 style='margin-top:20px'>Advanced Settings</h3>";
+        html += "<button onclick='document.getElementById(\"pid-tuning\").style.display=document.getElementById(\"pid-tuning\").style.display===\"none\"?\"block\":\"none\";this.innerText=this.innerText.includes(\"Show\")?\"▼ Hide PID Tuning\":\"▶ Show PID Tuning\"' style='margin:10px 0;padding:10px 15px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer'>▶ Show PID Tuning</button>";
+        html += "<div id='pid-tuning' style='display:none;margin-top:10px;padding:15px;background:#f0f0f0;border-radius:5px'>";
         html += "<div style='margin:10px 0'><label>Kp (Proportional): <input type='number' id='out-kp' step='0.1' style='width:100px'></label></div>";
         html += "<div style='margin:10px 0'><label>Ki (Integral): <input type='number' id='out-ki' step='0.01' style='width:100px'></label></div>";
         html += "<div style='margin:10px 0'><label>Kd (Derivative): <input type='number' id='out-kd' step='0.1' style='width:100px'></label></div>";
-
         html += "<p style='color:#666;font-size:14px'>💡 PID tuning affects auto (PID) mode. Start with Kp=10, Ki=0.5, Kd=2 and adjust based on performance.</p>";
+        html += "</div>";
 
         html += "</div>";
 
@@ -268,7 +332,7 @@ void webserver_init(void) {
     server.on("/api/set", HTTP_POST, handleSet);
     server.on("/api/control", HTTP_POST, handleControl);
     server.on("/api/save-settings", HTTP_POST, handleSaveSettings);
-    server.on("/api/save-schedule", HTTP_POST, handleSaveSchedule);
+    // Note: /api/save-schedule removed - use /api/output/{id}/config for per-output schedules
     server.on("/api/restart", HTTP_POST, handleRestart);
     server.on("/api/check-update", handleCheckUpdate);
     server.on("/api/auto-update", HTTP_POST, handleAutoUpdate);
@@ -370,14 +434,8 @@ void webserver_add_log(const char* message) {
     logger_add(message);
 }
 
-/**
- * Set schedule data
- */
-void webserver_set_schedule_data(bool enabled, int slotCount, void* slots) {
-    scheduleEnabled = enabled;
-    scheduleSlotCount = slotCount;
-    scheduleSlots = slots;
-}
+// webserver_set_schedule_data() removed - legacy function no longer needed
+// Schedule data now managed per-output via output_manager
 
 // ===== ROUTE HANDLERS =====
 
@@ -990,8 +1048,11 @@ static void handleSchedule(void) {
     html += "</select>";
     html += "</label>";
     html += "<p id='current-output-info' style='margin:10px 0;color:#666;font-size:14px'></p>";
+    html += "<div id='next-schedule-info' style='margin-top:15px;padding:12px;background:#e3f2fd;border-radius:5px;border-left:4px solid #2196F3;display:none'>";
+    html += "<strong>⏰ Next Scheduled Change:</strong> <span id='next-schedule-text'></span>";
     html += "</div>";
-    
+    html += "</div>";
+
     // Schedule slots container (will be filled by JavaScript)
     html += "<div id='schedule-slots' style='margin:20px 0'></div>";
 
@@ -1020,7 +1081,33 @@ static void handleSchedule(void) {
     html += "currentSchedule=d.schedule||[];";
     html += "document.getElementById('current-output-info').innerHTML='Currently viewing schedule for <strong>'+d.name+'</strong>';";
     html += "renderSlots();";
+    html += "updateNextSchedule();";
     html += "});}";
+
+    // Calculate and display next scheduled change
+    html += "function updateNextSchedule(){";
+    html += "let now=new Date();";
+    html += "let todayIdx=now.getDay();";
+    html += "let dayChars='SMTWTFS';";
+    html += "let activeSlots=currentSchedule.filter(s=>s.enabled&&s.days&&s.days.length>0);";
+    html += "if(activeSlots.length===0){document.getElementById('next-schedule-info').style.display='none';return;}";
+    html += "let nextSlot=null;let minDiff=999999;";
+    html += "for(let s of activeSlots){";
+    html += "for(let dayOffset=0;dayOffset<7;dayOffset++){";
+    html += "let checkDay=(todayIdx+dayOffset)%7;";
+    html += "if(s.days.indexOf(dayChars[checkDay])<0)continue;";
+    html += "let slotTime=new Date(now);";
+    html += "slotTime.setDate(now.getDate()+dayOffset);";
+    html += "slotTime.setHours(s.hour,s.minute,0,0);";
+    html += "let diff=(slotTime-now)/1000;";
+    html += "if(diff>0&&diff<minDiff){minDiff=diff;nextSlot={time:slotTime,temp:s.targetTemp};}}}";
+    html += "if(nextSlot){";
+    html += "let h=nextSlot.time.getHours().toString().padStart(2,'0');";
+    html += "let m=nextSlot.time.getMinutes().toString().padStart(2,'0');";
+    html += "let date=nextSlot.time.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'});";
+    html += "document.getElementById('next-schedule-text').innerHTML=date+' at '+h+':'+m+' → '+nextSlot.temp.toFixed(1)+'°C';";
+    html += "document.getElementById('next-schedule-info').style.display='block';}else{";
+    html += "document.getElementById('next-schedule-info').style.display='none';}}";
 
     // Render schedule slots HTML
     html += "function renderSlots(){";
@@ -1146,44 +1233,8 @@ static void handleSaveSettings(void) {
     }
 }
 
-/**
- * Handle save schedule
- */
-static void handleSaveSchedule(void) {
-    // Toggle schedule enable/disable
-    if (server.hasArg("schedule_enabled")) {
-        bool enabled = (server.arg("schedule_enabled") == "true");
-        scheduler_set_enabled(enabled);
-        scheduler_save();
-        server.send(200, "text/plain", "OK");
-        return;
-    }
-    
-    // Save full schedule
-    if (server.hasArg("slot_count")) {
-        int slotCount = server.arg("slot_count").toInt();
-        scheduler_set_slot_count(slotCount);
-        
-        for (int i = 0; i < 8; i++) {
-            ScheduleSlot_t slot;
-            slot.enabled = server.hasArg("enabled" + String(i)) && (server.arg("enabled" + String(i)) == "true");
-            slot.hour = server.arg("hour" + String(i)).toInt();
-            slot.minute = server.arg("minute" + String(i)).toInt();
-            slot.targetTemp = server.arg("temp" + String(i)).toFloat();
-            
-            String days = server.arg("days" + String(i));
-            if (days.length() == 0) days = "SMTWTFS";
-            strncpy(slot.days, days.c_str(), sizeof(slot.days) - 1);
-            slot.days[sizeof(slot.days) - 1] = '\0';
-            
-            scheduler_set_slot(i, &slot);
-        }
-        
-        scheduler_save();
-    }
-    
-    server.send(200, "text/plain", "OK");
-}
+// handleSaveSchedule() removed - legacy code replaced by per-output schedule API
+// Use /api/output/{id}/config to configure schedules per output
 
 /**
  * Handle restart
@@ -1392,8 +1443,21 @@ String webserver_get_html_header(const char* title, const char* activePage) {
     html += " onload=\"if(localStorage.getItem('darkMode')==='true'||((!localStorage.getItem('darkMode'))&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.body.classList.add('dark-mode');}\"";
 
     html += "><div class='container'>";
-    html += "<div class='header'><h1>" + String(deviceName) + "</h1>";
-    html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(firmwareVersion) + "</div></div>";
+    html += "<div class='header'>";
+    html += "<h1>" + String(deviceName) + "</h1>";
+    html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(firmwareVersion) + "</div>";
+    html += "<div id='current-time' style='font-size:14px;margin-top:8px;opacity:0.95'></div>";
+    html += "<script>";
+    html += "function updateClock(){";
+    html += "let now=new Date();";
+    html += "let h=now.getHours().toString().padStart(2,'0');";
+    html += "let m=now.getMinutes().toString().padStart(2,'0');";
+    html += "let s=now.getSeconds().toString().padStart(2,'0');";
+    html += "let date=now.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'});";
+    html += "document.getElementById('current-time').innerHTML='🕐 '+h+':'+m+':'+s+' | '+date;";
+    html += "}updateClock();setInterval(updateClock,1000);";
+    html += "</script>";
+    html += "</div>";
     html += buildNavBar(activePage);
 
     return html;
@@ -1498,7 +1562,8 @@ static void handleOutputAPI(void) {
         slot["enabled"] = output->schedule[i].enabled;
         slot["hour"] = output->schedule[i].hour;
         slot["minute"] = output->schedule[i].minute;
-        slot["target"] = serialized(String(output->schedule[i].targetTemp, 1));
+        slot["targetTemp"] = serialized(String(output->schedule[i].targetTemp, 1));
+        slot["days"] = output->schedule[i].days;
     }
 
     String response;
@@ -1784,25 +1849,45 @@ static String buildCSS(void) {
     css += ".output-grid{grid-template-columns:repeat(2,1fr)!important}";
     css += "}";
 
-    // Dark mode overrides
-    css += "body.dark-mode{background:#1a1a1a;color:#e0e0e0}";
-    css += "body.dark-mode .container{background:#2d2d2d;box-shadow:0 2px 10px rgba(0,0,0,0.5)}";
-    css += "body.dark-mode .header{background:linear-gradient(135deg,#2d5f2e,#1e3d1f)}";
-    css += "body.dark-mode h2{color:#b0b0b0}";
-    css += "body.dark-mode input,body.dark-mode select{background:#3d3d3d;color:#e0e0e0;border-color:#4d4d4d}";
-    css += "body.dark-mode .stat-card{background:#3d3d3d}";
-    css += "body.dark-mode .stat-label{color:#b0b0b0}";
-    css += "body.dark-mode .log-entry{border-bottom-color:#4d4d4d}";
-    css += "body.dark-mode .footer{border-top-color:#4d4d4d;color:#b0b0b0}";
-    css += "body.dark-mode .info-box{background:#1a2a3a;color:#e0e0e0}";
-    css += "body.dark-mode .warning-box{background:#3a3020;color:#e0e0e0}";
-    css += "body.dark-mode .nav a{background:#1e4d7a}";
-    css += "body.dark-mode .nav a:hover{background:#163c5f}";
-    css += "body.dark-mode .nav a.active{background:#2d5f2e}";
-    css += ".theme-toggle{flex:0;min-width:50px;padding:12px 15px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer;font-size:18px;text-align:center;text-decoration:none;transition:background 0.3s}";
+    // Output card styling
+    css += "[id^='output']{position:relative}";
+    css += "[id^='output'] h3{color:#333}";
+    css += "[id^='output'] div{color:#333}";
+    css += "[id^='output'] strong{color:#333}";
+
+    // Theme toggle button (must be before dark mode to avoid being overridden)
+    css += ".theme-toggle{flex:0;min-width:50px;padding:12px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer;font-size:18px;text-align:center;text-decoration:none;transition:background 0.3s;line-height:normal;box-sizing:border-box}";
     css += ".theme-toggle:hover{background:#0b7dda}";
+
+    // Dark mode overrides - improved contrast
+    css += "body.dark-mode{background:#121212;color:#f0f0f0}";
+    css += "body.dark-mode .container{background:#1e1e1e;box-shadow:0 2px 10px rgba(0,0,0,0.8)}";
+    css += "body.dark-mode .header{background:linear-gradient(135deg,#2d5f2e,#1e3d1f)}";
+    css += "body.dark-mode h2{color:#f0f0f0;border-bottom-color:#4d4d4d}";
+    css += "body.dark-mode h3{color:#f0f0f0}";
+    css += "body.dark-mode p{color:#d0d0d0}";
+    css += "body.dark-mode label{color:#f0f0f0}";
+    css += "body.dark-mode input,body.dark-mode select,body.dark-mode textarea{background:#2d2d2d;color:#f0f0f0;border:1px solid #4d4d4d}";
+    css += "body.dark-mode input::placeholder{color:#808080}";
+    css += "body.dark-mode button{background:#2d5f2e;color:#f0f0f0}";
+    css += "body.dark-mode button:hover{background:#3d7f3e}";
+    css += "body.dark-mode .btn-secondary{background:#1e4d7a}";
+    css += "body.dark-mode .btn-secondary:hover{background:#163c5f}";
+    css += "body.dark-mode .stat-card{background:#2d2d2d;border:1px solid #3d3d3d}";
+    css += "body.dark-mode .stat-value{color:#4CAF50}";
+    css += "body.dark-mode .stat-label{color:#d0d0d0}";
+    css += "body.dark-mode .log-entry{border-bottom-color:#3d3d3d;color:#d0d0d0}";
+    css += "body.dark-mode .footer{border-top-color:#3d3d3d;color:#d0d0d0}";
+    css += "body.dark-mode .info-box{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
+    css += "body.dark-mode .warning-box{background:#3a3020;color:#ffe0a0;border-left-color:#ffc107}";
+    css += "body.dark-mode .nav a{background:#1e4d7a;color:#f0f0f0}";
+    css += "body.dark-mode .nav a:hover{background:#2d6fa0}";
+    css += "body.dark-mode .nav a.active{background:#2d5f2e}";
     css += "body.dark-mode .theme-toggle{background:#1e4d7a}";
-    css += "body.dark-mode .theme-toggle:hover{background:#163c5f}";
+    css += "body.dark-mode .theme-toggle:hover{background:#2d6fa0}";
+    css += "body.dark-mode #next-schedule-info{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
+    css += "body.dark-mode #pid-tuning{background:#2d2d2d;color:#f0f0f0}";
+    css += "body.dark-mode #pid-tuning p{color:#d0d0d0}";
     css += "*{transition:background-color 0.3s,color 0.3s,border-color 0.3s}";
 
     css += "</style>";

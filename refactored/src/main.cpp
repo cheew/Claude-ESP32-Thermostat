@@ -27,9 +27,7 @@
 #include "web_server.h"
 
 // Include control modules (Phase 3)
-#include "pid_controller.h"
 #include "system_state.h"
-#include "scheduler.h"
 
 // Include hardware modules (Phase 4)
 #include "tft_display.h"
@@ -155,9 +153,7 @@ void setup() {
     webserver_set_device_info(deviceName, FIRMWARE_VERSION);
     webserver_set_control_callback(onWebControl);
     webserver_set_restart_callback(onWebRestart);
-    webserver_set_schedule_data(scheduler_is_enabled(), 
-                               scheduler_get_slot_count(), 
-                               scheduler_get_slots());
+    // Note: Schedule data now managed per-output via output_manager
     logger_add("Web server started");
     
     // Draw initial screen

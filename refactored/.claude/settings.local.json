@@ -17,7 +17,12 @@
       "Bash(cmd.exe /c \"dir /b C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe 2>nul\")",
       "Bash(cmd /c \"C:\\\\Users\\\\admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe --version\")",
       "Bash(python3 -m platformio run:*)",
-      "Bash(if exist nul del /f nul)"
+      "Bash(if exist nul del /f nul)",
+      "Bash(git tag:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth login)",
+      "Bash(del NEXT_SESSION_PREP.md NEXT_SESSION_PLAN.md NEXT_STEPS.md STATUS.md PROGRESS_UPDATE.md WIFI_FIX_TEST.md BUILD_INSTRUCTIONS_v1.9.1.md MULTI_OUTPUT_STATUS.md)"
     ]
   }
 }

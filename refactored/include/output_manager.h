@@ -12,9 +12,20 @@
 #define OUTPUT_MANAGER_H
 
 #include <Arduino.h>
-#include "scheduler.h"
 
 #define MAX_OUTPUTS 3
+#define MAX_SCHEDULE_SLOTS 8
+
+/**
+ * Schedule slot structure (per-output scheduling)
+ */
+typedef struct {
+    bool enabled;
+    uint8_t hour;
+    uint8_t minute;
+    float targetTemp;
+    char days[8];  // "SMTWTFS" format
+} ScheduleSlot_t;
 
 /**
  * Hardware types

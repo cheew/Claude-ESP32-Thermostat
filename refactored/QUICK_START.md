@@ -1,4 +1,4 @@
-# Quick Start Guide - Multi-Output Thermostat v2.0.0
+# Quick Start Guide - Multi-Output Thermostat v2.1.0
 
 ## 🚀 Getting Started
 
@@ -94,6 +94,105 @@ http://192.168.1.236/
 - Each slot: time + target temperature
 - Automatically switches between slots
 - Good for day/night temperature changes
+- See "Schedule Page" section below for setup
+
+---
+
+### 📅 Schedule Page (Time-Based Control)
+**Purpose:** Set different target temperatures for different times of day
+
+**Features:**
+- 8 time slots per output
+- Each slot: time (hour:minute) + target temperature
+- Days of week selection (M, T, W, Th, F, Sa, Su)
+- Independent schedules for each output
+
+**How to set up a schedule:**
+1. Click the "📅 Schedule" tab in navigation
+2. Select output from dropdown (Output 1, 2, or 3)
+3. For each time slot:
+   - Check "Enabled" to activate slot
+   - Set time (e.g., 08:00 for 8 AM)
+   - Set target temperature
+   - Select days of week (check boxes for active days)
+4. Click "Save Schedule"
+5. Go to Outputs page
+6. Set output mode to "Schedule"
+7. Click "Apply Control"
+
+**Example: Day/Night Temperature Cycle**
+- Slot 1: 08:00, 32°C, Mon-Sun (Morning basking)
+- Slot 2: 20:00, 24°C, Mon-Sun (Night cool-down)
+
+**Example: Weekday/Weekend Different**
+- Slot 1: 06:00, 30°C, Mon-Fri (Weekday morning)
+- Slot 2: 09:00, 30°C, Sat-Sun (Weekend morning)
+- Slot 3: 22:00, 22°C, Mon-Sun (Night)
+
+**Tips:**
+- Empty slots (no days selected) are ignored
+- Schedule checks every minute
+- Active slot = most recent time that has passed
+- Temperature changes gradually (PID control)
+
+---
+
+### 🏠 Home Assistant Integration (MQTT)
+**Purpose:** Control thermostat from Home Assistant
+
+**Setup Steps:**
+1. Click "⚙️ Settings" tab in navigation
+2. Scroll to "MQTT Settings" section
+3. Enter your MQTT broker details:
+   - **Broker IP:** Your MQTT broker address (e.g., 192.168.1.100)
+   - **Port:** Usually 1883
+   - **Username:** Your MQTT username (if required)
+   - **Password:** Your MQTT password (if required)
+4. Click "Save Settings"
+5. Restart ESP32 if needed
+
+**What you'll get in Home Assistant:**
+- **3 Climate Entities** (one per output)
+- Entity names match your output names
+- All grouped under single device: "ESP32-Thermostat"
+
+**Expected Entities:**
+```
+climate.lights_esp32_thermostat          (Output 1)
+climate.heat_mat_esp32_thermostat        (Output 2)
+climate.ceramic_heater_esp32_thermostat  (Output 3)
+```
+
+**Features:**
+- Current temperature display
+- Set target temperature
+- Change mode (Heat / Off)
+- Auto-discovery (no manual configuration needed)
+- Status updates every 30 seconds
+
+**MQTT Topics Used:**
+```
+thermostat/output1/temperature
+thermostat/output1/setpoint
+thermostat/output1/mode
+thermostat/output1/heating
+thermostat/output1/power
+... (same for output2 and output3)
+```
+
+**Home Assistant Auto-Discovery:**
+```
+homeassistant/climate/thermostat_output1/config
+homeassistant/climate/thermostat_output2/config
+homeassistant/climate/thermostat_output3/config
+```
+
+**Troubleshooting MQTT:**
+1. Verify MQTT broker is running
+2. Check broker IP and port in Settings
+3. Check console logs: `http://192.168.1.236/console`
+4. Restart Home Assistant to force entity discovery
+5. Check Home Assistant MQTT integration is enabled
 
 ---
 
@@ -299,6 +398,6 @@ Check these resources:
 
 ---
 
-**Version:** 2.0.0
-**Last Updated:** January 11, 2026
-**Status:** Ready for testing
+**Version:** 2.1.0
+**Last Updated:** January 12, 2026
+**Status:** Production ready

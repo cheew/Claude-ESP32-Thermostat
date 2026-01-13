@@ -77,13 +77,8 @@ void webserver_set_network_status(bool connected, bool apMode,
  */
 void webserver_add_log(const char* message);
 
-/**
- * Set schedule data for schedule page
- * @param enabled Schedule enabled state
- * @param slotCount Number of active slots
- * @param slots Pointer to schedule slot array
- */
-void webserver_set_schedule_data(bool enabled, int slotCount, void* slots);
+// webserver_set_schedule_data() removed - legacy function
+// Schedule data now managed per-output via output_manager
 
 /**
  * Get HTML header with navigation
