@@ -1,8 +1,8 @@
 # ESP32 Thermostat - Future Features & Roadmap
 
-**Document Version:** 1.0
-**Last Updated:** January 11, 2026
-**Current Project Version:** v1.9.0
+**Document Version:** 1.1
+**Last Updated:** January 13, 2026
+**Current Project Version:** v2.1.1
 
 ---
 
@@ -17,10 +17,10 @@ Transform the ESP32 thermostat from a single-output heating controller into a **
 
 ---
 
-## 🔧 Priority 1: Multi-Output Environmental Control
+## ✅ Priority 1: Multi-Output Environmental Control (COMPLETED v2.1.0)
 
 ### Overview
-Expand from single heating output to **3 independent outputs**, each with:
+~~Expand from~~ **Completed:** 3 independent outputs, each with:
 - Dedicated temperature sensor assignment
 - Flexible control hardware (AC dimmer, SSR, or relay)
 - Appropriate control modes based on hardware type
@@ -139,7 +139,579 @@ thermostat/output1/power
 
 ---
 
-## 🧙 Priority 2: Setup Wizard
+## 📺 Priority 2: TFT Display Integration
+
+### Overview
+Add local TFT touch display for standalone operation without requiring web interface access. Display provides:
+- **Real-time monitoring** of all 3 outputs
+- **Touch controls** for temperature adjustment
+- **Status indicators** at a glance
+- **Offline operation** (no WiFi/network required)
+- **Professional appearance** for visible installations
+
+### Hardware Options
+
+#### Option 1: ILI9341 2.8" TFT (Recommended for Budget)
+**Specifications:**
+- Display: 2.8" diagonal, 240×320 pixels
+- Interface: SPI (HSPI bus on ESP32)
+- Touch: Resistive touch screen (XPT2046)
+- Power: 3.3V/5V compatible
+- Cost: ~$10-15 USD
+- Libraries: TFT_eSPI, Adafruit_GFX
+
+**Pinout (ESP32):**
+```
+TFT Display Pins:
+- VCC  → 5V
+- GND  → GND
+- CS   → GPIO 15 (HSPI CS)
+- RESET → GPIO 2
+- DC   → GPIO 4 (OneWire moved to GPIO 25)
+- MOSI → GPIO 13 (HSPI)
+- SCK  → GPIO 14 (HSPI)
+- LED  → 3.3V (backlight, or PWM for dimming)
+- MISO → GPIO 12 (HSPI)
+
+Touch Screen Pins (XPT2046):
+- T_CLK → GPIO 14 (shared with display)
+- T_CS  → GPIO 33
+- T_DIN → GPIO 13 (shared with display)
+- T_DO  → GPIO 12 (shared with display)
+- T_IRQ → GPIO 35 (optional, for interrupt-driven touch)
+```
+
+**Important Note:**
+- OneWire sensors **must be moved** from GPIO 4 to GPIO 25 (or GPIO 26/27)
+- This requires hardware modification and firmware update
+- Migration process should be documented in update notes
+
+#### Option 2: ST7789 2.0" TFT (Compact Alternative)
+**Specifications:**
+- Display: 2.0" diagonal, 240×320 pixels
+- Interface: SPI
+- Touch: Optional (harder to integrate)
+- Power: 3.3V
+- Cost: ~$8-12 USD
+- **Advantage:** Smaller footprint, no touch complexity
+
+#### Option 3: ESP32-2432S028 (All-in-One Development Board)
+**Specifications:**
+- Display: 2.8" ILI9341 (240×320)
+- Touch: Resistive (XPT2046)
+- **Built-in:** ESP32, display, touch, SD card, speaker
+- Power: USB-C or 5V barrel jack
+- Cost: ~$15-20 USD
+- **Advantage:** No wiring, pre-integrated
+- **Disadvantage:** Locked GPIO assignments, may conflict with existing hardware
+
+### Display Layout Design
+
+#### Main Screen (Default View)
+```
+┌─────────────────────────────────────┐
+│ 🏠 ESP32 Thermostat      🕐 14:35:22│ ← Header (Device name + time)
+├─────────────────────────────────────┤
+│                                     │
+│  Output 1: Basking Lamp       🔥    │ ← Output 1 status
+│  Current: 32.5°C   Target: 35.0°C   │
+│  Mode: PID         Power: 75%       │
+│  ┌───────────────────────────┐      │
+│  │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░│      │ ← Power bar
+│  └───────────────────────────┘      │
+│                                     │
+├─────────────────────────────────────┤
+│  Output 2: Heat Mat           ⏸     │ ← Output 2 status
+│  Current: 28.1°C   Target: 30.0°C   │
+│  Mode: ON/OFF      Power: 0%        │
+│  ┌───────────────────────────┐      │
+│  │░░░░░░░░░░░░░░░░░░░░░░░░░░│      │
+│  └───────────────────────────┘      │
+│                                     │
+├─────────────────────────────────────┤
+│  Output 3: Ceramic Heater     🔥    │ ← Output 3 status
+│  Current: 25.8°C   Target: 27.0°C   │
+│  Mode: Schedule    Power: 45%       │
+│  ┌───────────────────────────┐      │
+│  │▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░│      │
+│  └───────────────────────────┘      │
+│                                     │
+└─────────────────────────────────────┘
+│ [Mode] [Target] [Schedule] [Settings]│ ← Touch buttons
+└─────────────────────────────────────┘
+```
+
+**Color Coding:**
+- Background: Black or dark gray (OLED-style for readability)
+- Text: White or light gray
+- Active heating: Red/Orange indicators 🔥
+- Idle: Gray indicators ⏸
+- Power bars: Gradient from green (0%) → yellow (50%) → red (100%)
+
+#### Touch Control Screen (Swipe Right or Tap "Target")
+```
+┌─────────────────────────────────────┐
+│ ◀ Back            Adjust Target Temp │
+├─────────────────────────────────────┤
+│                                     │
+│  Select Output:                     │
+│  ┌──────┐ ┌──────┐ ┌──────┐        │
+│  │ Out 1│ │ Out 2│ │ Out 3│        │ ← Tab selector
+│  └──────┘ └──────┘ └──────┘        │
+│                                     │
+│                                     │
+│        Basking Lamp                 │
+│                                     │
+│          32.5°C → 35.0°C            │ ← Current → Target
+│                                     │
+│    ┌─────────────────────────┐     │
+│    │         [  -  ]          │     │
+│    │                          │     │
+│    │          35.0°C          │     │ ← Large target display
+│    │                          │     │
+│    │         [  +  ]          │     │
+│    └─────────────────────────┘     │
+│                                     │
+│  Quick Adjustments:                 │
+│  [ +0.5 ]  [ +1.0 ]  [ +2.0 ]       │ ← Quick buttons
+│  [ -0.5 ]  [ -1.0 ]  [ -2.0 ]       │
+│                                     │
+│         [Apply Changes]             │ ← Confirm button
+│                                     │
+└─────────────────────────────────────┘
+```
+
+#### Mode Selection Screen (Tap "Mode")
+```
+┌─────────────────────────────────────┐
+│ ◀ Back               Select Mode     │
+├─────────────────────────────────────┤
+│                                     │
+│  Output 1: Basking Lamp             │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │     OFF                      │   │ ← Mode buttons
+│  │  Turn off completely         │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │   ✓ PID (Auto)               │   │ ← Currently active
+│  │  Automatic temp control      │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │     ON/OFF Thermostat        │   │
+│  │  Simple on/off switching     │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │     Manual                   │   │
+│  │  Fixed power percentage      │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │     Schedule                 │   │
+│  │  Time-based control          │   │
+│  └─────────────────────────────┘   │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+#### Schedule View (Tap "Schedule")
+```
+┌─────────────────────────────────────┐
+│ ◀ Back          Schedule Overview    │
+├─────────────────────────────────────┤
+│                                     │
+│  Output: [▼ Output 1: Basking Lamp] │ ← Dropdown
+│                                     │
+│  📅 Active Slots:                   │
+│                                     │
+│  ⏰ 08:00  →  32°C   M T W T F S S  │ ← Slot 1
+│  ⏰ 20:00  →  24°C   M T W T F S S  │ ← Slot 2
+│                                     │
+│  Next Change:                       │
+│  🕐 Tomorrow at 08:00 → 32.0°C      │
+│                                     │
+│  ℹ️  Edit schedules via web or app  │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+#### Settings/Info Screen (Tap "Settings")
+```
+┌─────────────────────────────────────┐
+│ ◀ Back              System Info      │
+├─────────────────────────────────────┤
+│                                     │
+│  Device: ESP32 Thermostat           │
+│  Version: v2.1.1                    │
+│                                     │
+│  WiFi: Connected                    │
+│  SSID: YourNetwork                  │
+│  IP: 192.168.1.236                  │
+│  RSSI: -65 dBm (Good)               │
+│                                     │
+│  MQTT: Connected                    │
+│  Broker: 192.168.1.100:1883         │
+│                                     │
+│  Uptime: 2d 14h 35m                 │
+│  Memory: 80% free                   │
+│                                     │
+│  📱 Web Interface:                  │
+│  http://192.168.1.236               │
+│                                     │
+│  Display Settings:                  │
+│  Brightness: ████████░░ 80%         │ ← Slider
+│  Sleep timeout: [▼ 5 minutes]      │
+│                                     │
+│        [Screen Calibration]         │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+### Technical Implementation
+
+#### Libraries Required
+```cpp
+// Display driver
+#include <TFT_eSPI.h>        // Hardware-accelerated TFT library
+// OR
+#include <Adafruit_GFX.h>    // Alternative (more portable)
+#include <Adafruit_ILI9341.h>
+
+// Touch screen
+#include <XPT2046_Touchscreen.h>
+
+// UI framework options:
+// Option A: Custom UI (lightweight)
+//   - Draw functions manually
+//   - Simple button/widget system
+//   - ~5-10 KB flash
+
+// Option B: LVGL (Light and Versatile Graphics Library)
+#include <lvgl.h>            // Professional UI framework
+//   - Widget system, themes, animations
+//   - Touch gesture support
+//   - ~50-80 KB flash overhead
+//   - Recommended for complex UIs
+```
+
+#### Display Manager Module
+
+**New file:** `src/hardware/display_manager.cpp` / `include/display_manager.h`
+
+```cpp
+// display_manager.h
+#ifndef DISPLAY_MANAGER_H
+#define DISPLAY_MANAGER_H
+
+#include <TFT_eSPI.h>
+#include <XPT2046_Touchscreen.h>
+
+// Display configuration
+#define TFT_CS    15
+#define TFT_DC    4   // NOTE: Conflicts with OneWire!
+#define TFT_RST   2
+#define TFT_LED   -1  // Backlight (not used, connected to 3.3V)
+
+#define TOUCH_CS  33
+#define TOUCH_IRQ 35
+
+// Screen dimensions
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+
+// UI screens
+enum DisplayScreen {
+    SCREEN_MAIN,         // Main status dashboard
+    SCREEN_CONTROL,      // Temperature adjustment
+    SCREEN_MODE,         // Mode selection
+    SCREEN_SCHEDULE,     // Schedule view
+    SCREEN_SETTINGS      // System info and settings
+};
+
+// Function declarations
+void display_init(void);
+void display_task(void);  // Call from main loop
+void display_update_output(int outputId, float temp, float target,
+                           const char* mode, int power, bool heating);
+void display_set_screen(DisplayScreen screen);
+void display_set_brightness(uint8_t percent);  // 0-100%
+void display_sleep(bool enable);
+
+// Callback for user interactions
+typedef void (*DisplayControlCallback_t)(int outputId, float newTarget);
+typedef void (*DisplayModeCallback_t)(int outputId, const char* mode);
+void display_set_control_callback(DisplayControlCallback_t callback);
+void display_set_mode_callback(DisplayModeCallback_t callback);
+
+#endif // DISPLAY_MANAGER_H
+```
+
+**Implementation Notes:**
+
+1. **Non-Blocking Design:**
+   ```cpp
+   void display_task(void) {
+       static unsigned long lastUpdate = 0;
+       static unsigned long lastTouch = 0;
+
+       // Update display at 10 Hz (smooth animations)
+       if (millis() - lastUpdate >= 100) {
+           display_refresh();  // Redraw current screen
+           lastUpdate = millis();
+       }
+
+       // Check touch input at 20 Hz (responsive)
+       if (millis() - lastTouch >= 50) {
+           display_handle_touch();
+           lastTouch = millis();
+       }
+
+       // Auto-sleep after timeout
+       if (sleepEnabled && (millis() - lastInteraction > sleepTimeout)) {
+           display_sleep(true);
+       }
+   }
+   ```
+
+2. **Memory-Efficient Graphics:**
+   ```cpp
+   // Use frame buffer sparingly (240×320×2 bytes = 150 KB!)
+   // Instead: Direct drawing with minimal buffer
+
+   // Draw output status card (reusable function)
+   void drawOutputCard(int x, int y, int w, int h, OutputData* data) {
+       tft.fillRoundRect(x, y, w, h, 5, TFT_DARKGREY);
+       tft.setTextColor(TFT_WHITE);
+       tft.drawString(data->name, x+10, y+5);
+       tft.drawFloat(data->currentTemp, 1, x+10, y+25);
+       // ... etc
+
+       // Power bar
+       int barWidth = (w - 20) * data->power / 100;
+       uint16_t barColor = getHeatColor(data->power);
+       tft.fillRect(x+10, y+h-20, barWidth, 10, barColor);
+   }
+   ```
+
+3. **Touch Calibration:**
+   ```cpp
+   // Store calibration data in Preferences
+   Preferences prefs;
+   prefs.begin("display", false);
+   touchCalibration[0] = prefs.getInt("cal_x1", 300);
+   touchCalibration[1] = prefs.getInt("cal_y1", 300);
+   // ... etc
+
+   // Calibration routine on first boot
+   void display_calibrate(void) {
+       tft.fillScreen(TFT_BLACK);
+       tft.drawString("Touch each corner", 60, 100);
+       // ... collect 4 corner points
+       // ... calculate mapping
+       // ... save to preferences
+   }
+   ```
+
+#### Integration with Main System
+
+**In `main.cpp`:**
+```cpp
+#include "display_manager.h"
+
+void setup() {
+    // ... existing initialization
+
+    display_init();
+
+    // Set callback for display control changes
+    display_set_control_callback([](int outputId, float newTarget) {
+        OutputControl_t* output = output_manager_get_output(outputId);
+        if (output) {
+            output_manager_set_target(outputId, newTarget);
+            Serial.printf("[Display] Output %d target changed to %.1f°C\n",
+                         outputId, newTarget);
+        }
+    });
+
+    display_set_mode_callback([](int outputId, const char* mode) {
+        output_manager_set_mode(outputId, mode);
+        Serial.printf("[Display] Output %d mode changed to %s\n",
+                     outputId, mode);
+    });
+}
+
+void loop() {
+    // ... existing tasks
+
+    display_task();  // Update display and handle touch
+
+    // Push output status to display (every 2 seconds)
+    static unsigned long lastDisplayUpdate = 0;
+    if (millis() - lastDisplayUpdate >= 2000) {
+        for (int i = 0; i < MAX_OUTPUTS; i++) {
+            OutputControl_t* output = output_manager_get_output(i);
+            if (output && output->config.enabled) {
+                display_update_output(
+                    i,
+                    output->currentTemp,
+                    output->targetTemp,
+                    output_manager_get_mode_string(i),
+                    output->powerPercent,
+                    output->isHeating
+                );
+            }
+        }
+        lastDisplayUpdate = millis();
+    }
+}
+```
+
+### Hardware Migration Plan
+
+#### Issue: GPIO 4 Conflict
+**Current:** GPIO 4 is used for OneWire temperature sensors (DS18B20)
+**New:** GPIO 4 needed for TFT DC (Data/Command) pin
+
+**Solutions:**
+
+**Option A: Move OneWire to GPIO 25** (Recommended)
+- GPIO 25 is unused and supports OneWire
+- Requires physical hardware change (rewire sensor bus)
+- Update firmware constant: `#define ONEWIRE_PIN 25`
+- **Migration process:**
+  1. Flash new firmware with both GPIO 4 and GPIO 25 support
+  2. Add "OneWire Migration" web page showing instructions
+  3. User moves wire from GPIO 4 → GPIO 25
+  4. Web page shows "sensors detected" when successful
+  5. Future firmwares only support GPIO 25
+
+**Option B: Alternative TFT DC Pin**
+- Use different GPIO for DC (e.g., GPIO 26 or GPIO 27)
+- Requires custom TFT_eSPI configuration
+- No hardware change for existing users
+- **Easier migration but less standardized**
+
+**Option C: Conditional Compilation**
+```cpp
+// platformio.ini
+[env:esp32dev]
+build_flags =
+    -DUSE_TFT_DISPLAY    ; Enable display support
+    -DONEWIRE_PIN=25     ; Move OneWire to GPIO 25
+
+[env:esp32dev-no-display]
+build_flags =
+    -DONEWIRE_PIN=4      ; Keep OneWire on GPIO 4 (legacy)
+```
+
+### Development Phases
+
+**Phase 1: Basic Display (8-10 hours)**
+- [x] Display driver integration (TFT_eSPI)
+- [x] Touch screen driver (XPT2046)
+- [x] Display manager module structure
+- [x] Main screen layout (3 outputs status)
+- [x] Basic touch detection
+- [x] Update display with live data
+
+**Phase 2: Interactive Controls (10-12 hours)**
+- [x] Target temperature adjustment screen
+- [x] Mode selection screen
+- [x] Touch button system (reusable widgets)
+- [x] Callbacks to main system
+- [x] Visual feedback (button press animations)
+
+**Phase 3: Advanced Features (8-10 hours)**
+- [x] Schedule overview screen
+- [x] Settings/info screen
+- [x] WiFi/MQTT status indicators
+- [x] Brightness control
+- [x] Sleep mode (auto-dim after inactivity)
+- [x] Screen calibration routine
+
+**Phase 4: Polish (5-8 hours)**
+- [x] Smooth animations (fade in/out)
+- [x] Better fonts (anti-aliased)
+- [x] Color themes (light/dark mode)
+- [x] Error notifications on display
+- [x] Boot splash screen
+- [x] Low-memory optimizations
+
+### Memory Impact Estimate
+
+**Flash Usage:**
+- TFT_eSPI library: ~20 KB
+- XPT2046 library: ~3 KB
+- Display manager code: ~15 KB
+- UI rendering functions: ~10 KB
+- Fonts (if custom): ~5-10 KB
+- **Total:** ~50-60 KB
+
+**RAM Usage:**
+- Display buffer (partial): ~10 KB (not full framebuffer)
+- Touch state: ~500 bytes
+- UI state machine: ~1 KB
+- **Total:** ~12 KB
+
+**Projected Totals (after display integration):**
+- Flash: 92% + 4% = **96%** ⚠️ **Tight but acceptable**
+- RAM: 22% + 4% = **26%** ✅ **Safe**
+
+**Optimization if needed:**
+- Remove debug logging strings
+- Compress font data
+- Use smaller icon set
+- Disable OTA update (free ~15 KB flash)
+
+### User Benefits
+
+1. **Standalone Operation**
+   - No phone or computer required
+   - Quick glance at status
+   - Immediate adjustments
+
+2. **Professional Appearance**
+   - Looks like commercial product
+   - Suitable for visible installations
+   - Impresses visitors
+
+3. **Backup Control**
+   - Works when WiFi is down
+   - No app installation required
+   - Physical interaction (reassuring for some users)
+
+4. **Speed**
+   - Faster than loading web page
+   - Touch response is instant
+   - No network latency
+
+### Potential Issues & Solutions
+
+**Issue 1: Flash Space Constraints (96% usage)**
+- **Solution:** Conditional compilation (display as optional feature)
+- **Solution:** Optimize existing code (remove unused features)
+- **Solution:** Consider ESP32-WROVER (4MB flash) for "premium" version
+
+**Issue 2: OneWire Migration Complexity**
+- **Solution:** Provide clear migration guide with photos
+- **Solution:** Dual-mode firmware (detect which GPIO has sensors)
+- **Solution:** Web interface shows "Display Ready" after migration
+
+**Issue 3: Touch Calibration**
+- **Solution:** Auto-calibration on first boot
+- **Solution:** Store calibration in Preferences (persistent)
+- **Solution:** Recalibration option in settings
+
+**Issue 4: Brightness Flicker**
+- **Solution:** Use hardware PWM for backlight (not digital on/off)
+- **Solution:** Smooth fade transitions (0-100% over 500ms)
+
+---
+
+## 🧙 Priority 3: Setup Wizard
 
 ### Overview
 Guided first-run setup wizard to configure:
@@ -250,7 +822,7 @@ server.on("/api/setup/save", handleSetupSave);
 
 ---
 
-## 📱 Priority 3: Android App Development
+## 📱 Priority 4: Android App Development
 
 ### Overview
 Professional Android app for remote thermostat management:
@@ -559,47 +1131,57 @@ void wifi_task(void) {
 
 ## 🗓️ Recommended Implementation Order
 
-### Phase 1: Foundation Fixes
-1. **Fix WiFi reconnection bug** (1 hour)
+### ✅ Phase 1: Foundation Fixes (COMPLETED v1.9.0)
+1. ~~**Fix WiFi reconnection bug**~~ (1 hour)
    - High user impact
    - Critical for reliability
    - Simple fix
 
-2. **Add sensor management page** (3 hours)
+2. ~~**Add sensor management page**~~ (3 hours)
    - Required for multi-output
    - Useful even with single output
    - Lays groundwork for setup wizard
 
-### Phase 2: Multi-Output Support
-3. **Implement 3-output system** (10 hours)
+### ✅ Phase 2: Multi-Output Support (COMPLETED v2.1.0)
+3. ~~**Implement 3-output system**~~ (10 hours)
    - Core feature expansion
    - Enables professional reptile setups
    - Most requested feature
 
-4. **Update MQTT for multi-output** (2 hours)
+4. ~~**Update MQTT for multi-output**~~ (2 hours)
    - Maintain Home Assistant integration
    - 3 separate climate entities
 
-### Phase 3: User Experience
-5. **Setup wizard** (25 hours)
+### 🔜 Phase 3: TFT Display Integration (NEXT)
+5. **TFT display hardware integration** (30-40 hours)
+   - Standalone operation without web/app
+   - Touch controls for temperature adjustment
+   - Professional appearance
+   - Offline operation capability
+   - **High user value:** Physical interaction preferred by many users
+   - **Blocker:** GPIO 4 conflict requires OneWire migration
+
+### Phase 4: User Experience
+6. **Setup wizard** (25 hours)
    - Dramatically improves first-run experience
    - Reduces support burden
    - Makes product more professional
+   - **Can leverage display for guided setup**
 
-### Phase 4: Remote Management
-6. **Android app development** (100+ hours)
+### Phase 5: Remote Management
+7. **Android app development** (100+ hours)
    - Significant time investment
    - High user value
    - Enables remote management
    - Opens door to monetization (premium features)
 
-### Phase 5: Polish & Optimization
-7. **Performance tuning** (5 hours)
+### Phase 6: Polish & Optimization
+8. **Performance tuning** (5 hours)
    - Optimize multi-sensor reads
    - Reduce memory usage where possible
    - Improve web page load times
 
-8. **Documentation & guides** (8 hours)
+9. **Documentation & guides** (8 hours)
    - User manual
    - Setup guide with photos
    - Troubleshooting guide
