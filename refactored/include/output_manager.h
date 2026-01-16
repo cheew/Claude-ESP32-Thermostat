@@ -17,6 +17,37 @@
 #define MAX_SCHEDULE_SLOTS 8
 
 /**
+ * Sensor health states
+ */
+typedef enum {
+    SENSOR_OK = 0,        // Sensor reading normally
+    SENSOR_STALE,         // No update within threshold
+    SENSOR_ERROR          // Invalid reading (-127, NaN, out-of-range)
+} SensorHealth_t;
+
+/**
+ * Fault modes - what to do when sensor fails
+ */
+typedef enum {
+    FAULT_MODE_OFF = 0,   // Turn output OFF (safest)
+    FAULT_MODE_HOLD_LAST, // Hold last known good power
+    FAULT_MODE_CAP_POWER  // Cap power to configured percentage
+} FaultMode_t;
+
+/**
+ * Output fault states
+ */
+typedef enum {
+    FAULT_NONE = 0,
+    FAULT_SENSOR_STALE,    // Sensor hasn't updated
+    FAULT_SENSOR_ERROR,    // Sensor reading invalid
+    FAULT_OVER_TEMP,       // Temperature exceeded max limit
+    FAULT_UNDER_TEMP,      // Temperature below min limit
+    FAULT_HEATER_NO_RISE,  // Heater on but temp not rising
+    FAULT_HEATER_RUNAWAY   // Temp rising after heater off
+} FaultState_t;
+
+/**
  * Schedule slot structure (per-output scheduling)
  */
 typedef struct {
@@ -86,6 +117,22 @@ typedef struct {
 
     // Schedule
     ScheduleSlot_t schedule[MAX_SCHEDULE_SLOTS];
+
+    // Safety settings (per-output)
+    float maxTempC;              // Hard cutoff max (default 40.0)
+    float minTempC;              // Hard cutoff min (default 5.0)
+    uint16_t faultTimeoutSec;    // Sensor stale timeout (default 30)
+    FaultMode_t faultMode;       // What to do on fault
+    uint8_t capPowerPct;         // Power cap if FAULT_MODE_CAP_POWER
+    bool autoResumeOnSensorOk;   // Auto-resume after sensor recovers
+
+    // Runtime fault state
+    SensorHealth_t sensorHealth;
+    FaultState_t faultState;
+    unsigned long lastValidReadTime;  // Last time sensor read was valid
+    float lastValidTemp;              // Last valid temperature
+    int lastValidPower;               // Power before fault occurred
+    unsigned long faultStartTime;     // When fault started
 } OutputConfig_t;
 
 /**
@@ -232,5 +279,43 @@ bool output_manager_is_compatible(DeviceType_t deviceType, HardwareType_t hardwa
  * @return Output index (0-2), or -1 if not found
  */
 int output_manager_get_output_by_name(const char* name);
+
+/**
+ * Set safety limits for output
+ * @param outputIndex Output index (0-2)
+ * @param maxTempC Maximum temperature cutoff
+ * @param minTempC Minimum temperature cutoff
+ * @param faultTimeoutSec Seconds before sensor is considered stale
+ */
+void output_manager_set_safety_limits(int outputIndex, float maxTempC, float minTempC, uint16_t faultTimeoutSec);
+
+/**
+ * Set fault mode for output
+ * @param outputIndex Output index (0-2)
+ * @param faultMode What to do on sensor fault
+ * @param capPowerPct Power cap percentage (for FAULT_MODE_CAP_POWER)
+ */
+void output_manager_set_fault_mode(int outputIndex, FaultMode_t faultMode, uint8_t capPowerPct);
+
+/**
+ * Clear fault state (manual reset)
+ * @param outputIndex Output index (0-2)
+ * @return true if fault cleared, false if conditions still fault-worthy
+ */
+bool output_manager_clear_fault(int outputIndex);
+
+/**
+ * Get fault state name
+ * @param fault Fault state
+ * @return Fault state name string
+ */
+const char* output_manager_get_fault_name(FaultState_t fault);
+
+/**
+ * Get sensor health name
+ * @param health Sensor health state
+ * @return Health state name string
+ */
+const char* output_manager_get_sensor_health_name(SensorHealth_t health);
 
 #endif // OUTPUT_MANAGER_H

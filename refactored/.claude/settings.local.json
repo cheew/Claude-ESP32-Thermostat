@@ -22,7 +22,12 @@
       "Bash(powershell -Command:*)",
       "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status)",
       "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth login)",
-      "Bash(del NEXT_SESSION_PREP.md NEXT_SESSION_PLAN.md NEXT_STEPS.md STATUS.md PROGRESS_UPDATE.md WIFI_FIX_TEST.md BUILD_INSTRUCTIONS_v1.9.1.md MULTI_OUTPUT_STATUS.md)"
+      "Bash(del NEXT_SESSION_PREP.md NEXT_SESSION_PLAN.md NEXT_STEPS.md STATUS.md PROGRESS_UPDATE.md WIFI_FIX_TEST.md BUILD_INSTRUCTIONS_v1.9.1.md MULTI_OUTPUT_STATUS.md)",
+      "Bash(gh release create:*)",
+      "Bash(gh release view:*)",
+      "Bash(pio device monitor:*)",
+      "Bash(tree:*)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -49,7 +49,19 @@ static const char* GITHUB_USER = "cheew";
 static const char* GITHUB_REPO = "Claude-ESP32-Thermostat";
 static const char* GITHUB_FIRMWARE = "firmware.bin";
 
+// Security settings
+static bool secureMode = false;
+static char securePin[8] = "";
+static char sessionToken[33] = "";
+
+// UI Mode (false = simple, true = advanced)
+static bool advancedMode = false;
+
 // Forward declarations - Route handlers
+static void handleLogin(void);
+static void handleLoginAPI(void);
+static void handleLogout(void);
+static void handleUIMode(void);
 static void handleRoot(void);
 static void handleSchedule(void);
 static void handleHistoryPage(void);
@@ -77,22 +89,230 @@ static void handleOutputsAPI(void);
 static void handleOutputAPI(void);
 static void handleOutputControl(void);
 static void handleOutputConfig(void);
+static void handleOutputClearFault(void);
 static void handleSensorsAPI(void);
 static void handleSensorName(void);
+
+// v1 API handlers
+static void handleHealthAPI(void);
 
 // HTML generation helpers
 static String buildCSS(void);
 static String buildNavBar(const char* activePage);
+
+// Authentication helpers
+static void generateSessionToken(void);
+static bool isAuthenticated(void);
+static void requireAuth(void);
+
+/**
+ * Generate a random session token
+ */
+static void generateSessionToken(void) {
+    const char* hex = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        sessionToken[i] = hex[random(16)];
+    }
+    sessionToken[32] = '\0';
+}
+
+/**
+ * Check if current request is authenticated
+ * Returns true if secure mode is off or valid session cookie present
+ */
+static bool isAuthenticated(void) {
+    // If secure mode disabled, always authenticated
+    if (!secureMode) return true;
+
+    // If no PIN set, always authenticated
+    if (strlen(securePin) == 0) return true;
+
+    // Check for valid session cookie
+    if (server.hasHeader("Cookie")) {
+        String cookie = server.header("Cookie");
+        String expectedCookie = "session=" + String(sessionToken);
+        if (cookie.indexOf(expectedCookie) >= 0 && strlen(sessionToken) > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Redirect to login page if not authenticated
+ */
+static void requireAuth(void) {
+    String redirect = server.uri();
+    server.sendHeader("Location", "/login?redirect=" + redirect);
+    server.send(302);
+}
+
+/**
+ * Handle login page (GET shows form, POST validates)
+ */
+static void handleLogin(void) {
+    String error = "";
+    String redirect = server.arg("redirect");
+    if (redirect.length() == 0) redirect = "/";
+
+    // Handle POST (form submission)
+    if (server.method() == HTTP_POST) {
+        String pin = server.arg("pin");
+        if (pin == String(securePin)) {
+            // Successful login - generate new session and set cookie
+            generateSessionToken();
+            server.sendHeader("Set-Cookie", "session=" + String(sessionToken) + "; Path=/; HttpOnly");
+            server.sendHeader("Location", redirect);
+            server.send(302);
+            Serial.println("[WebServer] Login successful");
+            return;
+        } else {
+            error = "Invalid PIN";
+            Serial.println("[WebServer] Login failed - invalid PIN");
+        }
+    }
+
+    // Show login form
+    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+    html += "<title>Login - " + String(deviceName) + "</title>";
+    html += "<style>";
+    html += "body{font-family:Arial,sans-serif;background:#f5f5f5;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}";
+    html += ".login-box{background:white;padding:40px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1);text-align:center;max-width:300px;width:90%}";
+    html += "h1{color:#333;margin-bottom:30px;font-size:24px}";
+    html += "input[type=password]{width:100%;padding:15px;font-size:24px;text-align:center;border:2px solid #ddd;border-radius:5px;margin-bottom:20px;letter-spacing:8px;box-sizing:border-box}";
+    html += "input[type=password]:focus{border-color:#2196F3;outline:none}";
+    html += "button{width:100%;padding:15px;font-size:18px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer}";
+    html += "button:hover{background:#1976D2}";
+    html += ".error{color:#f44336;margin-bottom:20px;padding:10px;background:#ffebee;border-radius:5px}";
+    html += ".device-name{color:#666;font-size:14px;margin-bottom:10px}";
+    html += "</style></head><body>";
+    html += "<div class='login-box'>";
+    html += "<div class='device-name'>" + String(deviceName) + "</div>";
+    html += "<h1>Enter PIN</h1>";
+    if (error.length() > 0) {
+        html += "<div class='error'>" + error + "</div>";
+    }
+    html += "<form method='POST'>";
+    html += "<input type='hidden' name='redirect' value='" + redirect + "'>";
+    html += "<input type='password' name='pin' maxlength='6' pattern='[0-9]*' inputmode='numeric' placeholder='****' autofocus required>";
+    html += "<button type='submit'>Login</button>";
+    html += "</form>";
+    html += "</div></body></html>";
+
+    server.send(200, "text/html", html);
+}
+
+/**
+ * Handle API login (JSON POST)
+ */
+static void handleLoginAPI(void) {
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"No data\"}");
+        return;
+    }
+
+    StaticJsonDocument<128> doc;
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    if (err) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    const char* pin = doc["pin"];
+    if (pin && strcmp(pin, securePin) == 0) {
+        generateSessionToken();
+        server.sendHeader("Set-Cookie", "session=" + String(sessionToken) + "; Path=/; HttpOnly");
+        server.send(200, "application/json", "{\"success\":true}");
+        Serial.println("[WebServer] API login successful");
+    } else {
+        server.send(401, "application/json", "{\"success\":false,\"error\":\"Invalid PIN\"}");
+        Serial.println("[WebServer] API login failed");
+    }
+}
+
+/**
+ * Handle logout
+ */
+static void handleLogout(void) {
+    // Clear session by setting expired cookie
+    server.sendHeader("Set-Cookie", "session=; Path=/; HttpOnly; Max-Age=0");
+    server.sendHeader("Location", "/");
+    server.send(302);
+    Serial.println("[WebServer] Logout");
+}
+
+/**
+ * Handle UI mode switch (Simple/Advanced)
+ */
+static void handleUIMode(void) {
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"No data\"}");
+        return;
+    }
+
+    StaticJsonDocument<64> doc;
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    if (err) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    const char* mode = doc["mode"];
+    if (mode) {
+        bool newAdvancedMode = (strcmp(mode, "advanced") == 0);
+        advancedMode = newAdvancedMode;
+
+        // Save to preferences
+        Preferences prefs;
+        prefs.begin("thermostat", false);
+        prefs.putBool("ui_advanced", advancedMode);
+        prefs.end();
+
+        Serial.printf("[WebServer] UI mode changed to: %s\n", advancedMode ? "Advanced" : "Simple");
+        server.send(200, "application/json", "{\"success\":true}");
+    } else {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing mode\"}");
+    }
+}
 
 /**
  * Initialize web server
  */
 void webserver_init(void) {
     Serial.println("[WebServer] Initializing web server");
-    
+
+    // Load security settings from preferences
+    Preferences prefs;
+    prefs.begin("thermostat", true);
+    secureMode = prefs.getBool("secure_mode", false);
+    String pin = prefs.getString("secure_pin", "");
+    strncpy(securePin, pin.c_str(), sizeof(securePin) - 1);
+    securePin[sizeof(securePin) - 1] = '\0';
+    advancedMode = prefs.getBool("ui_advanced", false);
+    prefs.end();
+
+    // Generate initial session token
+    generateSessionToken();
+
+    Serial.printf("[WebServer] Secure mode: %s, UI mode: %s\n",
+                  secureMode ? "ON" : "OFF",
+                  advancedMode ? "Advanced" : "Simple");
+
+    // Collect cookies for authentication
+    const char* headerKeys[] = {"Cookie"};
+    server.collectHeaders(headerKeys, 1);
+
     // Setup routes
     server.on("/", handleRoot);
+    server.on("/login", HTTP_GET, handleLogin);
+    server.on("/login", HTTP_POST, handleLogin);
+    server.on("/api/login", HTTP_POST, handleLoginAPI);
+    server.on("/logout", handleLogout);
+    server.on("/api/ui-mode", HTTP_POST, handleUIMode);
     server.on("/outputs", []() {
+        // Protected route
+        if (!isAuthenticated()) { requireAuth(); return; }
         String html = webserver_get_html_header("Outputs", "outputs");
 
         html += "<h2>Output Configuration</h2>";
@@ -354,6 +574,16 @@ void webserver_init(void) {
     server.on("/api/output/1/config", HTTP_POST, handleOutputConfig);
     server.on("/api/output/2/config", HTTP_POST, handleOutputConfig);
     server.on("/api/output/3/config", HTTP_POST, handleOutputConfig);
+    server.on("/api/output/1/clear-fault", HTTP_POST, handleOutputClearFault);
+    server.on("/api/output/2/clear-fault", HTTP_POST, handleOutputClearFault);
+    server.on("/api/output/3/clear-fault", HTTP_POST, handleOutputClearFault);
+
+    // v1 API routes (versioned endpoints)
+    server.on("/api/v1/health", HTTP_GET, handleHealthAPI);
+    server.on("/api/v1/outputs", HTTP_GET, handleOutputsAPI);
+    server.on("/api/v1/output/1", HTTP_GET, handleOutputAPI);
+    server.on("/api/v1/output/2", HTTP_GET, handleOutputAPI);
+    server.on("/api/v1/output/3", HTTP_GET, handleOutputAPI);
 
     // Sensor API routes
     server.on("/api/sensors", HTTP_GET, handleSensorsAPI);
@@ -440,69 +670,238 @@ void webserver_add_log(const char* message) {
 // ===== ROUTE HANDLERS =====
 
 /**
- * Handle root page (/) - Multi-Output Version
+ * Handle root page (/) - Simple or Advanced mode
  */
 static void handleRoot(void) {
     String html = webserver_get_html_header("Home", "home");
 
     if (networkAPMode) {
-        html += "<div class='warning-box'><strong>⚠️ AP Mode Active</strong><br>";
+        html += "<div class='warning-box'><strong>AP Mode Active</strong><br>";
         html += "Configure WiFi in <a href='/settings'>Settings</a></div>";
     }
 
-    // Multi-output auto-refresh script
-    html += "<script>function updateOutputs(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
-    html += "d.outputs.forEach((o,i)=>{let id=i+1;";
-    html += "document.getElementById('temp'+id).innerText=o.temp+'°C';";
-    html += "document.getElementById('target'+id).innerText=o.target+'°C';";
-    html += "document.getElementById('heating'+id).innerText=o.heating?'ON':'OFF';";
-    html += "document.getElementById('mode'+id).innerText=o.mode;";
-    html += "document.getElementById('power-val'+id).innerText=o.power+'%';";
-    html += "document.getElementById('power-fill'+id).style.width=o.power+'%';";
-    html += "let card=document.getElementById('output'+id);";
-    html += "card.style.background=o.heating?'#ffebee':'#e8f5e9';";
-    html += "card.style.opacity=o.enabled?'1':'0.5';";
-    html += "});});}updateOutputs();setInterval(updateOutputs,2000);</script>";
+    if (!advancedMode) {
+        // ========== SIMPLE MODE DASHBOARD ==========
+        // Clean, card-based layout with sliders and dropdowns
 
-    html += "<h2>Outputs</h2>";
-    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px;margin:20px 0'>";
+        // CSS for Simple mode cards
+        html += "<style>";
+        html += ".simple-card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:15px}";
+        html += ".simple-card.heating{background:linear-gradient(135deg,#ffebee,#fff);border-left:4px solid #f44336}";
+        html += ".simple-card.disabled{opacity:0.5}";
+        html += ".simple-card h3{margin:0 0 15px 0;font-size:18px;color:#333;display:flex;justify-content:space-between;align-items:center}";
+        html += ".temp-display{font-size:48px;font-weight:bold;color:#333;text-align:center;margin:10px 0}";
+        html += ".temp-display small{font-size:20px;color:#666;font-weight:normal}";
+        html += ".target-row{display:flex;align-items:center;gap:10px;margin:15px 0}";
+        html += ".target-row label{min-width:60px;color:#666}";
+        html += ".target-row input[type=range]{flex:1;height:8px}";
+        html += ".target-row .target-val{min-width:60px;text-align:right;font-weight:bold;font-size:18px}";
+        html += ".mode-row{display:flex;align-items:center;gap:10px;margin:15px 0}";
+        html += ".mode-row label{min-width:60px;color:#666}";
+        html += ".mode-row select{flex:1;padding:10px;font-size:16px;border-radius:5px;border:1px solid #ddd}";
+        html += ".power-row{display:none;align-items:center;gap:10px;margin:15px 0}";
+        html += ".power-row.show{display:flex}";
+        html += ".power-row label{min-width:60px;color:#666}";
+        html += ".power-row input[type=range]{flex:1}";
+        html += ".power-row .power-val{min-width:50px;text-align:right;font-weight:bold}";
+        html += ".status-indicator{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}";
+        html += ".status-indicator.on{background:#4CAF50;box-shadow:0 0 8px #4CAF50}";
+        html += ".status-indicator.off{background:#ccc}";
+        html += ".fault-chip{display:inline-block;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:bold;margin-left:8px}";
+        html += ".fault-chip.fault{background:#f44336;color:white}";
+        html += ".fault-chip.stale{background:#ff9800;color:white}";
+        html += ".fault-chip.ok{display:none}";
+        html += ".simple-card.fault{border-left:4px solid #f44336;background:linear-gradient(135deg,#ffebee,#fff)}";
+        html += ".clear-fault-btn{background:#f44336;color:white;border:none;padding:8px 16px;border-radius:5px;cursor:pointer;font-size:12px;margin-top:10px}";
+        html += ".clear-fault-btn:hover{background:#d32f2f}";
+        html += "</style>";
 
-    // Generate cards for all 3 outputs
-    for (int i = 0; i < 3; i++) {
-        OutputConfig_t* output = output_manager_get_output(i);
-        if (!output) continue;
+        // JavaScript for Simple mode
+        html += "<script>";
+        // Update function
+        html += "function updateSimple(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
+        html += "d.outputs.forEach((o,i)=>{let id=i+1;";
+        html += "let card=document.getElementById('card'+id);";
+        html += "if(!card)return;";
+        html += "document.getElementById('currTemp'+id).innerText=o.enabled?(o.temp!==null?o.temp.toFixed(1):'--.-'):'--.-';";
+        html += "card.className='simple-card'+(o.inFault?' fault':'')+(o.heating?' heating':'')+(o.enabled?'':' disabled');";
+        html += "document.getElementById('status'+id).className='status-indicator '+(o.heating?'on':'off');";
+        // Fault chip update
+        html += "let faultChip=document.getElementById('faultChip'+id);";
+        html += "let clearBtn=document.getElementById('clearFault'+id);";
+        html += "if(o.inFault){faultChip.className='fault-chip fault';faultChip.innerText=o.faultState;clearBtn.style.display='block';}";
+        html += "else if(o.sensorHealth!=='OK'){faultChip.className='fault-chip stale';faultChip.innerText=o.sensorHealth;clearBtn.style.display='none';}";
+        html += "else{faultChip.className='fault-chip ok';clearBtn.style.display='none';}";
+        html += "});}).catch(e=>console.error(e));}";
 
-        int id = i + 1;
-        String bgColor = output->heating ? "#ffebee" : "#e8f5e9";
+        // Control functions
+        html += "function setTarget(id,val){";
+        html += "document.getElementById('targetVal'+id).innerText=parseFloat(val).toFixed(1)+'°C';";
+        html += "fetch('/api/output/'+id+'/control',{method:'POST',headers:{'Content-Type':'application/json'},";
+        html += "body:JSON.stringify({target:parseFloat(val)})}).then(()=>updateSimple());}";
 
-        html += "<div id='output" + String(id) + "' style='background:" + bgColor + ";padding:15px;border-radius:8px;";
-        html += "box-shadow:0 2px 5px rgba(0,0,0,0.1);opacity:" + String(output->enabled ? "1" : "0.5") + "'>";
-        html += "<h3 style='margin:0 0 10px 0'>" + String(output->name) + " (Output " + String(id) + ")</h3>";
+        html += "function setMode(id,mode){";
+        html += "let powerRow=document.getElementById('powerRow'+id);";
+        html += "powerRow.className='power-row'+(mode==='manual'?' show':'');";
+        html += "let data={mode:mode};";
+        html += "if(mode==='manual')data.power=parseInt(document.getElementById('powerSlider'+id).value);";
+        html += "fetch('/api/output/'+id+'/control',{method:'POST',headers:{'Content-Type':'application/json'},";
+        html += "body:JSON.stringify(data)}).then(()=>updateSimple());}";
 
-        // Status info
-        html += "<div style='margin:8px 0'><strong>Current:</strong> <span id='temp" + String(id) + "'>" + String(output->currentTemp, 1) + "°C</span></div>";
-        html += "<div style='margin:8px 0'><strong>Target:</strong> <span id='target" + String(id) + "'>" + String(output->targetTemp, 1) + "°C</span></div>";
-        html += "<div style='margin:8px 0'><strong>Status:</strong> <span id='heating" + String(id) + "'>" + String(output->heating ? "ON" : "OFF") + "</span></div>";
-        html += "<div style='margin:8px 0'><strong>Mode:</strong> <span id='mode" + String(id) + "'>" + String(output_manager_get_mode_name(output->controlMode)) + "</span></div>";
+        html += "function setPower(id,val){";
+        html += "document.getElementById('powerVal'+id).innerText=val+'%';";
+        html += "fetch('/api/output/'+id+'/control',{method:'POST',headers:{'Content-Type':'application/json'},";
+        html += "body:JSON.stringify({power:parseInt(val)})}).then(()=>updateSimple());}";
 
-        // Power bar
-        html += "<div style='margin:10px 0'><strong>Power: <span id='power-val" + String(id) + "'>" + String(output->currentPower) + "%</span></strong>";
-        html += "<div style='width:100%;height:20px;background:#ddd;border-radius:5px;overflow:hidden;margin-top:5px'>";
-        html += "<div id='power-fill" + String(id) + "' style='height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s;width:" + String(output->currentPower) + "%'></div></div></div>";
+        // Clear fault function
+        html += "function clearFault(id){";
+        html += "fetch('/api/output/'+id+'/clear-fault',{method:'POST'}).then(r=>r.json()).then(d=>{";
+        html += "if(d.ok){updateSimple();}else{alert('Cannot clear fault: '+d.error.message);}";
+        html += "}).catch(e=>alert('Error: '+e));}";
 
-        // Quick controls
-        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'off'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Off</button>";
-        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'manual',power:50})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Manual 50%</button>";
-        html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'pid'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>PID</button>";
+        // Start polling
+        html += "updateSimple();setInterval(updateSimple,3000);";
+        html += "</script>";
+
+        // Output cards
+        html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin:20px 0'>";
+
+        for (int i = 0; i < 3; i++) {
+            OutputConfig_t* output = output_manager_get_output(i);
+            if (!output) continue;
+
+            int id = i + 1;
+            String cardClass = "simple-card";
+            if (output->faultState != FAULT_NONE) cardClass += " fault";
+            else if (output->heating) cardClass += " heating";
+            if (!output->enabled) cardClass += " disabled";
+
+            html += "<div id='card" + String(id) + "' class='" + cardClass + "'>";
+
+            // Header with name, status indicator, and fault chip
+            html += "<h3><span><span id='status" + String(id) + "' class='status-indicator " + String(output->heating ? "on" : "off") + "'></span>";
+            html += String(output->name);
+
+            // Fault chip - shows fault state
+            String faultChipClass = "fault-chip";
+            String faultText = "";
+            if (output->faultState != FAULT_NONE) {
+                faultChipClass += " fault";
+                faultText = output_manager_get_fault_name(output->faultState);
+            } else if (output->sensorHealth != SENSOR_OK) {
+                faultChipClass += " stale";
+                faultText = output_manager_get_sensor_health_name(output->sensorHealth);
+            } else {
+                faultChipClass += " ok";
+            }
+            html += "<span id='faultChip" + String(id) + "' class='" + faultChipClass + "'>" + faultText + "</span>";
+
+            html += "</span>";
+            html += "<span style='font-size:12px;color:#999'>Output " + String(id) + "</span></h3>";
+
+            // Current temperature (large)
+            html += "<div class='temp-display'><span id='currTemp" + String(id) + "'>";
+            if (output->enabled && output->currentTemp > -100) {
+                html += String(output->currentTemp, 1);
+            } else {
+                html += "--.-";
+            }
+            html += "</span><small>°C</small></div>";
+
+            // Target temperature slider
+            html += "<div class='target-row'>";
+            html += "<label>Target:</label>";
+            html += "<input type='range' min='15' max='35' step='0.5' value='" + String(output->targetTemp, 1) + "' ";
+            html += "oninput='document.getElementById(\"targetVal" + String(id) + "\").innerText=parseFloat(this.value).toFixed(1)+\"°C\"' ";
+            html += "onchange='setTarget(" + String(id) + ",this.value)'>";
+            html += "<span id='targetVal" + String(id) + "' class='target-val'>" + String(output->targetTemp, 1) + "°C</span>";
+            html += "</div>";
+
+            // Mode dropdown
+            html += "<div class='mode-row'>";
+            html += "<label>Mode:</label>";
+            html += "<select onchange='setMode(" + String(id) + ",this.value)'>";
+            html += "<option value='off'" + String(output->controlMode == CONTROL_MODE_OFF ? " selected" : "") + ">Off</option>";
+            html += "<option value='manual'" + String(output->controlMode == CONTROL_MODE_MANUAL ? " selected" : "") + ">Manual</option>";
+            html += "<option value='pid'" + String(output->controlMode == CONTROL_MODE_PID ? " selected" : "") + ">PID (Auto)</option>";
+            html += "<option value='onoff'" + String(output->controlMode == CONTROL_MODE_ONOFF ? " selected" : "") + ">On/Off</option>";
+            html += "</select>";
+            html += "</div>";
+
+            // Manual power slider (hidden unless manual mode)
+            html += "<div id='powerRow" + String(id) + "' class='power-row" + String(output->controlMode == CONTROL_MODE_MANUAL ? " show" : "") + "'>";
+            html += "<label>Power:</label>";
+            html += "<input type='range' id='powerSlider" + String(id) + "' min='0' max='100' value='" + String(output->manualPower) + "' ";
+            html += "oninput='document.getElementById(\"powerVal" + String(id) + "\").innerText=this.value+\"%\"' ";
+            html += "onchange='setPower(" + String(id) + ",this.value)'>";
+            html += "<span id='powerVal" + String(id) + "' class='power-val'>" + String(output->manualPower) + "%</span>";
+            html += "</div>";
+
+            // Clear fault button (shown only when in fault)
+            String clearBtnStyle = output->faultState != FAULT_NONE ? "block" : "none";
+            html += "<button id='clearFault" + String(id) + "' class='clear-fault-btn' style='display:" + clearBtnStyle + "' onclick='clearFault(" + String(id) + ")'>Clear Fault</button>";
+
+            html += "</div>";
+        }
 
         html += "</div>";
+
+    } else {
+        // ========== ADVANCED MODE (original) ==========
+        // Multi-output auto-refresh script
+        html += "<script>function updateOutputs(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
+        html += "d.outputs.forEach((o,i)=>{let id=i+1;";
+        html += "document.getElementById('temp'+id).innerText=o.temp+'°C';";
+        html += "document.getElementById('target'+id).innerText=o.target+'°C';";
+        html += "document.getElementById('heating'+id).innerText=o.heating?'ON':'OFF';";
+        html += "document.getElementById('mode'+id).innerText=o.mode;";
+        html += "document.getElementById('power-val'+id).innerText=o.power+'%';";
+        html += "document.getElementById('power-fill'+id).style.width=o.power+'%';";
+        html += "let card=document.getElementById('output'+id);";
+        html += "card.style.background=o.heating?'#ffebee':'#e8f5e9';";
+        html += "card.style.opacity=o.enabled?'1':'0.5';";
+        html += "});});}updateOutputs();setInterval(updateOutputs,2000);</script>";
+
+        html += "<h2>Outputs</h2>";
+        html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px;margin:20px 0'>";
+
+        // Generate cards for all 3 outputs
+        for (int i = 0; i < 3; i++) {
+            OutputConfig_t* output = output_manager_get_output(i);
+            if (!output) continue;
+
+            int id = i + 1;
+            String bgColor = output->heating ? "#ffebee" : "#e8f5e9";
+
+            html += "<div id='output" + String(id) + "' style='background:" + bgColor + ";padding:15px;border-radius:8px;";
+            html += "box-shadow:0 2px 5px rgba(0,0,0,0.1);opacity:" + String(output->enabled ? "1" : "0.5") + "'>";
+            html += "<h3 style='margin:0 0 10px 0'>" + String(output->name) + " (Output " + String(id) + ")</h3>";
+
+            // Status info
+            html += "<div style='margin:8px 0'><strong>Current:</strong> <span id='temp" + String(id) + "'>" + String(output->currentTemp, 1) + "°C</span></div>";
+            html += "<div style='margin:8px 0'><strong>Target:</strong> <span id='target" + String(id) + "'>" + String(output->targetTemp, 1) + "°C</span></div>";
+            html += "<div style='margin:8px 0'><strong>Status:</strong> <span id='heating" + String(id) + "'>" + String(output->heating ? "ON" : "OFF") + "</span></div>";
+            html += "<div style='margin:8px 0'><strong>Mode:</strong> <span id='mode" + String(id) + "'>" + String(output_manager_get_mode_name(output->controlMode)) + "</span></div>";
+
+            // Power bar
+            html += "<div style='margin:10px 0'><strong>Power: <span id='power-val" + String(id) + "'>" + String(output->currentPower) + "%</span></strong>";
+            html += "<div style='width:100%;height:20px;background:#ddd;border-radius:5px;overflow:hidden;margin-top:5px'>";
+            html += "<div id='power-fill" + String(id) + "' style='height:100%;background:linear-gradient(90deg,#4CAF50,#ff9800);transition:width 0.3s;width:" + String(output->currentPower) + "%'></div></div></div>";
+
+            // Quick controls
+            html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'off'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Off</button>";
+            html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'manual',power:50})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>Manual 50%</button>";
+            html += "<button onclick=\"fetch('/api/output/" + String(id) + "/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'pid'})}).then(()=>updateOutputs())\" style='margin:5px 2px;padding:8px 12px;font-size:12px'>PID</button>";
+
+            html += "</div>";
+        }
+
+        html += "</div>";
+
+        html += "<p style='margin-top:20px;text-align:center;color:#666'>";
+        html += "Visit <a href='/outputs'>Outputs Configuration</a> for detailed control | ";
+        html += "Visit <a href='/sensors'>Sensors</a> to manage sensors</p>";
     }
-
-    html += "</div>";
-
-    html += "<p style='margin-top:20px;text-align:center;color:#666'>";
-    html += "💡 Visit <a href='/outputs'>Outputs Configuration</a> for detailed control | ";
-    html += "🌡️ Visit <a href='/sensors'>Sensors</a> to manage sensors</p>";
 
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
@@ -518,7 +917,8 @@ static void handleStatus(void) {
     doc["heating"] = heatingState;
     doc["mode"] = currentMode;
     doc["power"] = powerOutput;
-    
+    doc["secureMode"] = secureMode;
+
     String output;
     serializeJson(doc, output);
     server.send(200, "application/json", output);
@@ -928,8 +1328,11 @@ static void handleHistoryPage(void) {
  * Handle settings page
  */
 static void handleSettings(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     String html = webserver_get_html_header("Settings", "settings");
-    
+
     // Load settings from preferences
     Preferences prefs;
     prefs.begin("thermostat", true);
@@ -953,7 +1356,24 @@ static void handleSettings(void) {
     html += "<h2>Device Settings</h2>";
     html += "<div class='control'><label>Device Name:</label>";
     html += "<input type='text' name='device_name' value='" + String(deviceName) + "' maxlength='15'></div>";
-    
+
+    html += "<h2>Security</h2>";
+    if (secureMode) {
+        html += "<div class='info-box'>PIN protection is <strong>enabled</strong>. <a href='/logout'>Logout</a></div>";
+    }
+    html += "<div class='control'><label><input type='checkbox' name='secure_mode' value='1'";
+    if (secureMode) html += " checked";
+    html += "> Enable PIN Protection</label></div>";
+    html += "<div class='control'><label>PIN (4-6 digits):</label>";
+    html += "<input type='password' name='secure_pin' maxlength='6' pattern='[0-9]{4,6}' inputmode='numeric' placeholder='";
+    if (strlen(securePin) > 0) {
+        html += "****";
+    } else {
+        html += "Enter PIN";
+    }
+    html += "'></div>";
+    html += "<p style='color:#666;font-size:14px'>Leave PIN blank to keep current PIN. When enabled, Settings, Outputs config, and control actions require login.</p>";
+
     html += "<h2>WiFi Configuration</h2>";
     html += "<div class='control'><label>WiFi SSID:</label>";
     html += "<input type='text' name='wifi_ssid' value='" + savedSSID + "' required></div>";
@@ -1177,6 +1597,9 @@ static void handleSchedule(void) {
  * Handle save settings
  */
 static void handleSaveSettings(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     // Save settings via Preferences
     Preferences prefs;
     prefs.begin("thermostat", false);
@@ -1217,7 +1640,23 @@ static void handleSaveSettings(void) {
     if (server.hasArg("kd")) {
         prefs.putFloat("Kd", server.arg("kd").toFloat());
     }
-    
+
+    // Save security settings
+    bool newSecureMode = server.hasArg("secure_mode");
+    prefs.putBool("secure_mode", newSecureMode);
+    secureMode = newSecureMode;
+
+    // Only update PIN if a new one is provided
+    if (server.hasArg("secure_pin") && server.arg("secure_pin").length() >= 4) {
+        String newPin = server.arg("secure_pin");
+        prefs.putString("secure_pin", newPin);
+        strncpy(securePin, newPin.c_str(), sizeof(securePin) - 1);
+        securePin[sizeof(securePin) - 1] = '\0';
+        Serial.println("[WebServer] PIN updated");
+    }
+
+    Serial.printf("[WebServer] Secure mode: %s\n", secureMode ? "ON" : "OFF");
+
     prefs.end();
     
     String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
@@ -1240,6 +1679,9 @@ static void handleSaveSettings(void) {
  * Handle restart
  */
 static void handleRestart(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     html += "<meta http-equiv='refresh' content='10;url=/'>";
     html += "<title>Restarting</title></head><body style='text-align:center;padding-top:50px'>";
@@ -1257,6 +1699,9 @@ static void handleRestart(void) {
  * Handle update page
  */
 static void handleUpdate(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     String html = webserver_get_html_header("Firmware Update", "settings");
     
     html += "<div class='info-box'><strong>Current Version:</strong> " + String(firmwareVersion) + "</div>";
@@ -1279,6 +1724,11 @@ static void handleUpdate(void) {
  * Handle firmware upload
  */
 static void handleUpload(void) {
+    // Protected route - check on first chunk only
+    if (server.upload().status == UPLOAD_FILE_START && !isAuthenticated()) {
+        return; // Will be handled by handleUploadDone
+    }
+
     HTTPUpload& upload = server.upload();
     
     if (upload.status == UPLOAD_FILE_START) {
@@ -1303,6 +1753,9 @@ static void handleUpload(void) {
  * Handle upload done
  */
 static void handleUploadDone(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     html += "<meta http-equiv='refresh' content='15;url=/'>";
     html += "<title>Update Complete</title></head><body style='text-align:center;padding-top:50px'>";
@@ -1490,7 +1943,7 @@ String webserver_get_html_footer(unsigned long uptimeSeconds) {
  * GET /api/outputs - Get all outputs status
  */
 static void handleOutputsAPI(void) {
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<1536> doc;
     JsonArray outputs = doc.createNestedArray("outputs");
 
     for (int i = 0; i < 3; i++) {
@@ -1509,6 +1962,11 @@ static void handleOutputsAPI(void) {
         obj["sensor"] = output->sensorAddress;
         obj["deviceType"] = output_manager_get_device_type_name(output->deviceType);
         obj["hardwareType"] = output_manager_get_hardware_type_name(output->hardwareType);
+
+        // Fault status
+        obj["sensorHealth"] = output_manager_get_sensor_health_name(output->sensorHealth);
+        obj["faultState"] = output_manager_get_fault_name(output->faultState);
+        obj["inFault"] = (output->faultState != FAULT_NONE);
     }
 
     String response;
@@ -1535,7 +1993,7 @@ static void handleOutputAPI(void) {
         return;
     }
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<768> doc;
     doc["id"] = outputId;
     doc["name"] = output->name;
     doc["enabled"] = output->enabled;
@@ -1554,6 +2012,25 @@ static void handleOutputAPI(void) {
     pid["kp"] = serialized(String(output->pidKp, 2));
     pid["ki"] = serialized(String(output->pidKi, 2));
     pid["kd"] = serialized(String(output->pidKd, 2));
+
+    // Safety settings
+    JsonObject safety = doc.createNestedObject("safety");
+    safety["maxTempC"] = serialized(String(output->maxTempC, 1));
+    safety["minTempC"] = serialized(String(output->minTempC, 1));
+    safety["faultTimeoutSec"] = output->faultTimeoutSec;
+    safety["faultMode"] = output->faultMode == FAULT_MODE_OFF ? "off" :
+                          output->faultMode == FAULT_MODE_HOLD_LAST ? "hold" : "cap";
+    safety["capPowerPct"] = output->capPowerPct;
+    safety["autoResume"] = output->autoResumeOnSensorOk;
+
+    // Current fault status
+    JsonObject fault = doc.createNestedObject("fault");
+    fault["sensorHealth"] = output_manager_get_sensor_health_name(output->sensorHealth);
+    fault["state"] = output_manager_get_fault_name(output->faultState);
+    fault["inFault"] = (output->faultState != FAULT_NONE);
+    if (output->faultState != FAULT_NONE) {
+        fault["durationSec"] = (millis() - output->faultStartTime) / 1000;
+    }
 
     // Schedule
     JsonArray schedule = doc.createNestedArray("schedule");
@@ -1575,6 +2052,12 @@ static void handleOutputAPI(void) {
  * POST /api/output/{id}/control - Control output (mode, target, manual power)
  */
 static void handleOutputControl(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"error\":\"Unauthorized\"}");
+        return;
+    }
+
     String path = server.uri();
     int outputId = path.substring(path.lastIndexOf('/') - 1, path.lastIndexOf('/')).toInt();
     int outputIndex = outputId - 1;
@@ -1633,6 +2116,12 @@ static void handleOutputControl(void) {
  * POST /api/output/{id}/config - Configure output (name, sensor, device type, PID, schedule)
  */
 static void handleOutputConfig(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"error\":\"Unauthorized\"}");
+        return;
+    }
+
     String path = server.uri();
     int outputId = path.substring(path.lastIndexOf('/') - 1, path.lastIndexOf('/')).toInt();
     int outputIndex = outputId - 1;
@@ -1859,6 +2348,9 @@ static String buildCSS(void) {
     css += ".theme-toggle{flex:0;min-width:50px;padding:12px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer;font-size:18px;text-align:center;text-decoration:none;transition:background 0.3s;line-height:normal;box-sizing:border-box}";
     css += ".theme-toggle:hover{background:#0b7dda}";
 
+    // Mode toggle dropdown
+    css += ".mode-toggle{padding:10px 15px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:14px;font-weight:bold}";
+
     // Dark mode overrides - improved contrast
     css += "body.dark-mode{background:#121212;color:#f0f0f0}";
     css += "body.dark-mode .container{background:#1e1e1e;box-shadow:0 2px 10px rgba(0,0,0,0.8)}";
@@ -1900,18 +2392,166 @@ static String buildCSS(void) {
  */
 static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
+
+    // Home always visible
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
-    nav += "<a href='/outputs' class='" + String(strcmp(activePage, "outputs") == 0 ? "active" : "") + "'>💡 Outputs</a>";
-    nav += "<a href='/sensors' class='" + String(strcmp(activePage, "sensors") == 0 ? "active" : "") + "'>🌡️ Sensors</a>";
-    nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
-    nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
-    nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";
-    nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";
-    nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
+
+    // Advanced mode pages
+    if (advancedMode) {
+        nav += "<a href='/outputs' class='" + String(strcmp(activePage, "outputs") == 0 ? "active" : "") + "'>💡 Outputs</a>";
+        nav += "<a href='/sensors' class='" + String(strcmp(activePage, "sensors") == 0 ? "active" : "") + "'>🌡️ Sensors</a>";
+        nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
+        nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
+        nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";
+        nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";
+        nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
+    }
+
+    // Settings always visible
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";
+
+    // Mode toggle dropdown
+    nav += "<select class='mode-toggle' onchange='switchUIMode(this.value)'>";
+    nav += "<option value='simple'" + String(!advancedMode ? " selected" : "") + ">Simple</option>";
+    nav += "<option value='advanced'" + String(advancedMode ? " selected" : "") + ">Advanced</option>";
+    nav += "</select>";
+
     nav += "<button class='theme-toggle' onclick='toggleDarkMode()' title='Toggle Dark Mode'>🌓</button>";
     nav += "</div>";
-    nav += "<script>function toggleDarkMode(){document.body.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.body.classList.contains('dark-mode'));}</script>";
+
+    // JavaScript for dark mode and UI mode switching
+    nav += "<script>";
+    nav += "function toggleDarkMode(){document.body.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.body.classList.contains('dark-mode'));}";
+    nav += "function switchUIMode(mode){fetch('/api/ui-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})}).then(()=>location.reload());}";
+    nav += "</script>";
 
     return nav;
+}
+
+// ===== NEW v1 API HANDLERS =====
+
+/**
+ * POST /api/output/{id}/clear-fault - Clear fault state for an output
+ */
+static void handleOutputClearFault(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"ok\":false,\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"Authentication required\"}}");
+        return;
+    }
+
+    String path = server.uri();
+    // Extract output ID from path like /api/output/1/clear-fault
+    int start = path.indexOf("/output/") + 8;
+    int end = path.indexOf("/clear-fault");
+    int outputId = path.substring(start, end).toInt();
+    int outputIndex = outputId - 1;
+
+    if (outputIndex < 0 || outputIndex >= 3) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":{\"code\":\"INVALID_OUTPUT\",\"message\":\"Invalid output ID\"}}");
+        return;
+    }
+
+    OutputConfig_t* output = output_manager_get_output(outputIndex);
+    if (!output) {
+        server.send(404, "application/json", "{\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"Output not found\"}}");
+        return;
+    }
+
+    // Try to clear the fault
+    bool cleared = output_manager_clear_fault(outputIndex);
+
+    StaticJsonDocument<256> doc;
+    doc["ok"] = cleared;
+    if (cleared) {
+        doc["data"]["message"] = "Fault cleared";
+    } else {
+        doc["error"]["code"] = "FAULT_ACTIVE";
+        doc["error"]["message"] = "Cannot clear fault - condition still active";
+        doc["error"]["currentFault"] = output_manager_get_fault_name(output->faultState);
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(cleared ? 200 : 400, "application/json", response);
+}
+
+/**
+ * GET /api/v1/health - System health and diagnostics
+ */
+static void handleHealthAPI(void) {
+    StaticJsonDocument<1024> doc;
+    doc["ok"] = true;
+
+    JsonObject data = doc.createNestedObject("data");
+
+    // System info
+    data["uptime"] = millis() / 1000;
+    data["freeHeap"] = ESP.getFreeHeap();
+    data["minFreeHeap"] = ESP.getMinFreeHeap();
+    data["heapSize"] = ESP.getHeapSize();
+    data["chipModel"] = ESP.getChipModel();
+    data["cpuFreqMHz"] = ESP.getCpuFreqMHz();
+
+    // Flash info
+    JsonObject flash = data.createNestedObject("flash");
+    flash["size"] = ESP.getFlashChipSize();
+    flash["speed"] = ESP.getFlashChipSpeed();
+
+    // Network status
+    JsonObject network = data.createNestedObject("network");
+    network["wifiConnected"] = WiFi.isConnected();
+    network["ssid"] = WiFi.SSID();
+    network["rssi"] = WiFi.RSSI();
+    network["ip"] = WiFi.localIP().toString();
+
+    // Sensor status summary
+    JsonObject sensors = data.createNestedObject("sensors");
+    int sensorCount = sensor_manager_get_count();
+    int healthySensors = 0;
+    for (int i = 0; i < sensorCount; i++) {
+        const SensorInfo_t* sensor = sensor_manager_get_sensor(i);
+        if (sensor && sensor->discovered && sensor_manager_is_valid_temp(sensor->lastReading)) {
+            healthySensors++;
+        }
+    }
+    sensors["total"] = sensorCount;
+    sensors["healthy"] = healthySensors;
+
+    // Output status summary
+    JsonObject outputsHealth = data.createNestedObject("outputs");
+    int faultCount = 0;
+    int activeCount = 0;
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (output) {
+            if (output->faultState != FAULT_NONE) faultCount++;
+            if (output->enabled && output->heating) activeCount++;
+        }
+    }
+    outputsHealth["total"] = 3;
+    outputsHealth["inFault"] = faultCount;
+    outputsHealth["heating"] = activeCount;
+
+    // Detailed output fault status
+    JsonArray faults = data.createNestedArray("faults");
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (output && output->faultState != FAULT_NONE) {
+            JsonObject fault = faults.createNestedObject();
+            fault["outputId"] = i + 1;
+            fault["outputName"] = output->name;
+            fault["fault"] = output_manager_get_fault_name(output->faultState);
+            fault["sensorHealth"] = output_manager_get_sensor_health_name(output->sensorHealth);
+            fault["durationSec"] = (millis() - output->faultStartTime) / 1000;
+        }
+    }
+
+    // Build info
+    JsonObject build = data.createNestedObject("build");
+    build["version"] = firmwareVersion;
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
 }

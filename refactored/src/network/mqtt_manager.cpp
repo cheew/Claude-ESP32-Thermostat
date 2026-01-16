@@ -400,7 +400,7 @@ void mqtt_send_ha_discovery(const char* devName, const char* devId) {
         device["name"] = deviceName;
         device["model"] = "ESP32 Multi-Output Thermostat";
         device["manufacturer"] = "DIY";
-        device["sw_version"] = "2.0.0";
+        device["sw_version"] = "2.2.0";
 
         serializeJson(doc, payloadBuf);
 

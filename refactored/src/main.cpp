@@ -1,20 +1,18 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 2.1.0 - Multi-Output with MQTT, Schedule & Mobile
- * Last Updated: January 11, 2026
+ * Version: 2.2.0 - Safety Features & Project Cleanup
+ * Last Updated: January 16, 2026
+ *
+ * v2.2.0 Changes:
+ * - Sensor fault detection (stale/error states per output)
+ * - Hard temperature cutoffs (max/min limits override all modes)
+ * - Health API endpoint for monitoring
+ * - Project cleanup and documentation consolidation
  *
  * v2.1.0 Changes:
  * - MQTT multi-output support (3 Home Assistant climate entities)
  * - Schedule page with per-output scheduling
  * - Mobile responsive design (phones and tablets)
- *
- * v2.0.0 Changes:
- * - Multi-output control (3 independent outputs)
- * - Multi-sensor support (up to 6 DS18B20 sensors)
- * - Output 1: Lights (AC dimmer only)
- * - Output 2 & 3: Heat devices (SSR only)
- * - Sensor manager with auto-discovery
- * - Per-output scheduling and PID control
  */
 
 #include <Arduino.h>
@@ -30,7 +28,7 @@
 #include "system_state.h"
 
 // Include hardware modules (Phase 4)
-#include "tft_display.h"
+#include "display_manager.h"
 
 // Include hardware modules (Phase 5 - Multi-output)
 #include "sensor_manager.h"
@@ -42,7 +40,7 @@
 #include "console.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "2.1.0"
+#define FIRMWARE_VERSION "2.2.0"
 
 // Hardware configuration
 #define ONE_WIRE_BUS 4  // DS18B20 OneWire bus pin
@@ -52,6 +50,9 @@ unsigned long lastSensorRead = 0;
 unsigned long lastOutputUpdate = 0;
 unsigned long lastMqttPublish = 0;
 unsigned long bootTime = 0;
+
+// Device name (global for use in loop)
+char deviceName[32] = "ESP32-Thermostat";
 
 // Legacy compatibility (for TFT display - uses Output 1 by default)
 static SystemState_t legacyState = {
@@ -70,7 +71,7 @@ void onMQTTSetpoint(const char* topic, const char* message);
 void onMQTTMode(const char* topic, const char* message);
 void onWebControl(float temp, const char* mode);
 void onWebRestart(void);
-void onTouchButton(int buttonId);
+// void onTouchButton(int buttonId);  // OLD TFT - no longer used
 
 void setup() {
     Serial.begin(115200);
@@ -86,9 +87,8 @@ void setup() {
     logger_add("System boot - v" FIRMWARE_VERSION);
     console_add_event(CONSOLE_EVENT_SYSTEM, "System boot - v" FIRMWARE_VERSION);
 
-    // Initialize TFT display
-    tft_init();
-    tft_show_boot_message("Initializing...");
+    // Initialize TFT display (3-output support)
+    display_init();
 
     // Initialize sensor manager
     sensor_manager_init(ONE_WIRE_BUS);
@@ -114,9 +114,8 @@ void setup() {
         }
     }
 
-    // Get device name for network and display
-    char deviceName[32] = "ESP32-Thermostat";
-    // Try to load from preferences
+    // Load device name from preferences
+    // (deviceName is global variable)
     Preferences prefs;
     prefs.begin("thermostat", true);
     String savedName = prefs.getString("device_name", "");
@@ -124,10 +123,25 @@ void setup() {
         strncpy(deviceName, savedName.c_str(), sizeof(deviceName) - 1);
     }
     prefs.end();
-    tft_set_device_name(deviceName);
-    
-    // Register touch button callback
-    tft_register_touch_callback(onTouchButton);
+
+    // Set up display callbacks
+    display_set_control_callback([](int outputId, float newTarget) {
+        output_manager_set_target(outputId, newTarget);
+        console_add_event_f(CONSOLE_EVENT_SYSTEM, "Display: Output %d target set to %.1f°C", outputId + 1, newTarget);
+    });
+
+    display_set_mode_callback([](int outputId, const char* mode) {
+        // Convert mode string to enum
+        ControlMode_t modeEnum = CONTROL_MODE_OFF;
+        if (strcmp(mode, "off") == 0) modeEnum = CONTROL_MODE_OFF;
+        else if (strcmp(mode, "manual") == 0) modeEnum = CONTROL_MODE_MANUAL;
+        else if (strcmp(mode, "pid") == 0) modeEnum = CONTROL_MODE_PID;
+        else if (strcmp(mode, "onoff") == 0) modeEnum = CONTROL_MODE_ONOFF;
+        else if (strcmp(mode, "schedule") == 0) modeEnum = CONTROL_MODE_SCHEDULE;
+
+        output_manager_set_mode(outputId, modeEnum);
+        console_add_event_f(CONSOLE_EVENT_SYSTEM, "Display: Output %d mode set to %s", outputId + 1, mode);
+    });
     
     // Initialize WiFi
     wifi_init();
@@ -156,9 +170,37 @@ void setup() {
     // Note: Schedule data now managed per-output via output_manager
     logger_add("Web server started");
     
-    // Draw initial screen
-    tft_switch_screen(SCREEN_MAIN);
-    
+    // Display is initialized and showing main screen
+
+    // Do immediate first display update so temps show right away
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (output && output->enabled) {
+            const char* modeStr = output_manager_get_mode_name(output->controlMode);
+            display_update_output(
+                i,
+                output->currentTemp,
+                output->targetTemp,
+                modeStr ? modeStr : "off",
+                output->currentPower,
+                output->heating
+            );
+            if (output->name[0] != '\0') {
+                display_set_output_name(i, output->name);
+            }
+        }
+    }
+
+    // Update system status
+    DisplaySystemData sysData = {0};
+    strncpy(sysData.deviceName, deviceName, sizeof(sysData.deviceName) - 1);
+    strncpy(sysData.firmwareVersion, FIRMWARE_VERSION, sizeof(sysData.firmwareVersion) - 1);
+    sysData.wifiConnected = !wifi_is_ap_mode();
+    sysData.mqttConnected = mqtt_is_connected();
+    sysData.uptime = (millis() - bootTime) / 1000;
+    sysData.freeMemory = (ESP.getFreeHeap() * 100) / ESP.getHeapSize();
+    display_update_system(&sysData);
+
     Serial.println("=== Initialization Complete ===");
     Serial.print("Free heap: ");
     Serial.println(ESP.getFreeHeap());
@@ -174,8 +216,8 @@ void loop() {
 
     webserver_task();
 
-    // TFT display task
-    tft_task();
+    // Display task (handles screen updates and touch input)
+    display_task();
 
     // Read all sensors (every 2s)
     if (millis() - lastSensorRead >= 2000) {
@@ -189,14 +231,43 @@ void loop() {
         lastOutputUpdate = millis();
     }
 
-    // Update legacy state for TFT display (uses Output 1)
-    updateLegacyState();
+    // Update display with all 3 outputs (every 2 seconds for live temp updates)
+    static unsigned long lastDisplayUpdate = 0;
+    if (millis() - lastDisplayUpdate >= 2000) {
+        for (int i = 0; i < 3; i++) {
+            OutputConfig_t* output = output_manager_get_output(i);
+            if (output && output->enabled) {
+                // Get mode name as string
+                const char* modeStr = output_manager_get_mode_name(output->controlMode);
 
-    // Update TFT display values (Output 1 only for now)
-    tft_update_main_screen(legacyState.currentTemp, legacyState.targetTemp,
-                          legacyState.heating, legacyState.mode, legacyState.power);
-    tft_set_wifi_status(!wifi_is_ap_mode(), wifi_is_ap_mode());
-    tft_set_mqtt_status(mqtt_is_connected());
+                display_update_output(
+                    i,
+                    output->currentTemp,
+                    output->targetTemp,
+                    modeStr ? modeStr : "off",
+                    output->currentPower,
+                    output->heating
+                );
+
+                // Update output name on display
+                if (output->name[0] != '\0') {
+                    display_set_output_name(i, output->name);
+                }
+            }
+        }
+
+        // Update system status for display
+        DisplaySystemData sysData = {0};
+        strncpy(sysData.deviceName, deviceName, sizeof(sysData.deviceName) - 1);
+        strncpy(sysData.firmwareVersion, FIRMWARE_VERSION, sizeof(sysData.firmwareVersion) - 1);
+        sysData.wifiConnected = !wifi_is_ap_mode();
+        sysData.mqttConnected = mqtt_is_connected();
+        sysData.uptime = (millis() - bootTime) / 1000;
+        sysData.freeMemory = (ESP.getFreeHeap() * 100) / ESP.getHeapSize();
+        display_update_system(&sysData);
+
+        lastDisplayUpdate = millis();
+    }
 
     // Update webserver state (legacy - uses Output 1)
     webserver_set_state(legacyState.currentTemp, legacyState.targetTemp, legacyState.heating,
@@ -300,7 +371,7 @@ void onMQTTSetpoint(const char* topic, const char* message) {
         logger_add(log);
         console_add_event_f(CONSOLE_EVENT_MQTT, "MQTT: Target %.1f°C", newTarget);
 
-        tft_request_update();
+        // tft_request_update();  // OLD TFT - display updates automatically
     }
 }
 
@@ -325,7 +396,7 @@ void onMQTTMode(const char* topic, const char* message) {
     logger_add(log);
     console_add_event_f(CONSOLE_EVENT_MQTT, "MQTT: Mode %s", newMode.c_str());
 
-    tft_request_update();
+    // tft_request_update();  // OLD TFT - display updates automatically
 }
 
 void onWebControl(float temp, const char* newMode) {
@@ -349,7 +420,7 @@ void onWebControl(float temp, const char* newMode) {
     logger_add(log);
     console_add_event_f(CONSOLE_EVENT_SYSTEM, "Web control: %.1f°C %s", temp, newMode);
 
-    tft_request_update();
+    // tft_request_update();  // OLD TFT - display updates automatically
 
     // Publish to MQTT
     if (mqtt_is_connected()) {
@@ -363,6 +434,7 @@ void onWebRestart(void) {
     ESP.restart();
 }
 
+/*  OLD TFT BUTTON HANDLER - NO LONGER USED
 void onTouchButton(int buttonId) {
     // TFT controls Output 1 only (legacy compatibility)
     OutputConfig_t* output1 = output_manager_get_output(0);
@@ -434,6 +506,7 @@ void onTouchButton(int buttonId) {
             break;
     }
 }
+*/  // END OLD TFT BUTTON HANDLER
 
 // ===== END OF MAIN.CPP =====
 // Multi-output system v2.0.0

@@ -2,6 +2,45 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.2.0] - 2026-01-16
+
+### Added
+- **Sensor Fault Detection**: Per-output sensor health monitoring
+  - Tracks sensor states: OK, STALE (no update within threshold), ERROR (invalid readings)
+  - Configurable fault timeout per output
+  - Fault mode options: OFF, HOLD_LAST, CAP_POWER
+  - Automatic failsafe state when sensor issues detected
+- **Hard Temperature Cutoffs**: Safety limits that override all control modes
+  - Per-output max_temp_c and min_temp_c limits
+  - OVER_TEMP fault forces output OFF regardless of mode
+  - Works even when schedule or PID requests heating
+- **Health API Endpoint**: `/api/v1/health` for system monitoring
+  - Sensor status per output
+  - Fault state reporting
+  - Uptime and memory metrics
+
+### Changed
+- **Project Structure Cleanup**: Consolidated documentation for efficiency
+  - Created `START_HERE.md` - concise quick reference (~80 lines)
+  - Moved old docs to `Archive/docs/` (SESSION_SUMMARY, QUICK_START, etc.)
+  - Moved release notes to `Archive/releases/`
+  - Moved deprecated code to `Archive/deprecated/`
+  - Deleted junk files (Windows artifacts, empty folders)
+- **Version Sync**: Unified version numbers across all files
+  - main.cpp, config.h, display_manager.cpp, mqtt_manager.cpp, wifi_manager.cpp
+
+### Files Modified
+- `src/main.cpp` - Version update, header comments
+- `src/control/output_manager.cpp` - Sensor fault handling, safety cutoffs
+- `include/output_manager.h` - Fault state enums, config structs
+- `src/network/web_server.cpp` - Health endpoint
+- `src/hardware/display_manager.cpp` - Version in splash screen
+- `include/config.h` - Version constant
+- `src/network/mqtt_manager.cpp` - MQTT device version
+- `src/network/wifi_manager.cpp` - mDNS version
+
+---
+
 ## [2.1.0] - 2026-01-11
 
 ### Added

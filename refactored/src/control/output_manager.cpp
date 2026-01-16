@@ -26,11 +26,20 @@ static OutputConfig_t outputs[MAX_OUTPUTS];
 // Hardware objects
 static dimmerLamp* dimmer1 = nullptr;  // Output 1 (AC dimmer)
 
+// Default safety limits
+#define DEFAULT_MAX_TEMP_C 40.0f
+#define DEFAULT_MIN_TEMP_C 5.0f
+#define DEFAULT_FAULT_TIMEOUT_SEC 30
+#define DEFAULT_CAP_POWER_PCT 30
+
 // Forward declarations
 static void updateOutput(int index);
 static void updatePID(int index);
 static void updateSchedule(int index);
 static void setOutputPower(int index, int power);
+static void checkSensorHealth(int index);
+static void checkTemperatureLimits(int index);
+static void handleFaultState(int index);
 
 /**
  * Initialize output manager
@@ -40,6 +49,22 @@ void output_manager_init(void) {
 
     // Clear output array
     memset(outputs, 0, sizeof(outputs));
+
+    // Initialize all outputs with safety defaults
+    for (int i = 0; i < MAX_OUTPUTS; i++) {
+        outputs[i].maxTempC = DEFAULT_MAX_TEMP_C;
+        outputs[i].minTempC = DEFAULT_MIN_TEMP_C;
+        outputs[i].faultTimeoutSec = DEFAULT_FAULT_TIMEOUT_SEC;
+        outputs[i].faultMode = FAULT_MODE_OFF;
+        outputs[i].capPowerPct = DEFAULT_CAP_POWER_PCT;
+        outputs[i].autoResumeOnSensorOk = false;
+        outputs[i].sensorHealth = SENSOR_OK;
+        outputs[i].faultState = FAULT_NONE;
+        outputs[i].lastValidReadTime = millis();
+        outputs[i].lastValidTemp = 20.0f;
+        outputs[i].lastValidPower = 0;
+        outputs[i].faultStartTime = 0;
+    }
 
     // Initialize Output 1 (AC Dimmer for lights)
     outputs[0].enabled = true;
@@ -114,8 +139,37 @@ OutputConfig_t* output_manager_get_output(int outputIndex) {
  */
 void output_manager_update(void) {
     for (int i = 0; i < MAX_OUTPUTS; i++) {
+        // Always update current temperature from sensor (even if disabled)
+        const SensorInfo_t* sensor = sensor_manager_get_sensor_by_address(outputs[i].sensorAddress);
+        if (sensor && sensor->discovered) {
+            outputs[i].currentTemp = sensor->lastReading;
+
+            // Track valid readings for fault recovery
+            if (sensor_manager_is_valid_temp(outputs[i].currentTemp)) {
+                outputs[i].lastValidReadTime = millis();
+                outputs[i].lastValidTemp = outputs[i].currentTemp;
+            }
+        } else if (strlen(outputs[i].sensorAddress) == 0) {
+            // No sensor assigned - keep showing last known temp or 0
+        } else {
+            // Sensor assigned but not found
+            outputs[i].currentTemp = -127.0f;
+        }
+
         if (outputs[i].enabled) {
-            updateOutput(i);
+            // Check sensor health first
+            checkSensorHealth(i);
+
+            // Check temperature limits (hard cutoffs)
+            checkTemperatureLimits(i);
+
+            // Handle any active fault state
+            if (outputs[i].faultState != FAULT_NONE) {
+                handleFaultState(i);
+            } else {
+                // Normal operation
+                updateOutput(i);
+            }
         } else {
             // Output disabled, turn off
             setOutputPower(i, 0);
@@ -131,14 +185,7 @@ void output_manager_update(void) {
 static void updateOutput(int index) {
     OutputConfig_t* output = &outputs[index];
 
-    // Get current temperature from assigned sensor
-    const SensorInfo_t* sensor = sensor_manager_get_sensor_by_address(output->sensorAddress);
-    if (sensor && sensor->discovered) {
-        output->currentTemp = sensor->lastReading;
-    } else {
-        // No sensor assigned or sensor not found
-        output->currentTemp = -127.0f;
-    }
+    // Note: currentTemp is already updated in output_manager_update()
 
     // Update based on control mode
     switch (output->controlMode) {
@@ -152,11 +199,13 @@ static void updateOutput(int index) {
             setOutputPower(index, output->manualPower);
             output->currentPower = output->manualPower;
             output->heating = (output->manualPower > 0);
+            output->lastValidPower = output->currentPower;  // Track for fault recovery
             break;
 
         case CONTROL_MODE_PID:
             if (sensor_manager_is_valid_temp(output->currentTemp)) {
                 updatePID(index);
+                output->lastValidPower = output->currentPower;  // Track for fault recovery
             } else {
                 setOutputPower(index, 0);
                 output->currentPower = 0;
@@ -178,6 +227,7 @@ static void updateOutput(int index) {
                     output->heating = false;
                 }
                 // Else: maintain current state (hysteresis)
+                output->lastValidPower = output->currentPower;  // Track for fault recovery
             } else {
                 setOutputPower(index, 0);
                 output->currentPower = 0;
@@ -187,6 +237,7 @@ static void updateOutput(int index) {
 
         case CONTROL_MODE_SCHEDULE:
             updateSchedule(index);
+            output->lastValidPower = output->currentPower;  // Track for fault recovery
             break;
     }
 }
@@ -522,6 +573,14 @@ void output_manager_load_config(void) {
         outputs[i].pidKi = prefs.getFloat("pidKi", outputs[i].pidKi);
         outputs[i].pidKd = prefs.getFloat("pidKd", outputs[i].pidKd);
 
+        // Load safety settings
+        outputs[i].maxTempC = prefs.getFloat("maxTempC", DEFAULT_MAX_TEMP_C);
+        outputs[i].minTempC = prefs.getFloat("minTempC", DEFAULT_MIN_TEMP_C);
+        outputs[i].faultTimeoutSec = prefs.getUShort("faultTimeout", DEFAULT_FAULT_TIMEOUT_SEC);
+        outputs[i].faultMode = (FaultMode_t)prefs.getUChar("faultMode", FAULT_MODE_OFF);
+        outputs[i].capPowerPct = prefs.getUChar("capPowerPct", DEFAULT_CAP_POWER_PCT);
+        outputs[i].autoResumeOnSensorOk = prefs.getBool("autoResume", false);
+
         // Load schedule
         for (int j = 0; j < MAX_SCHEDULE_SLOTS; j++) {
             char key[16];
@@ -569,6 +628,14 @@ void output_manager_save_config(void) {
         prefs.putFloat("pidKp", outputs[i].pidKp);
         prefs.putFloat("pidKi", outputs[i].pidKi);
         prefs.putFloat("pidKd", outputs[i].pidKd);
+
+        // Save safety settings
+        prefs.putFloat("maxTempC", outputs[i].maxTempC);
+        prefs.putFloat("minTempC", outputs[i].minTempC);
+        prefs.putUShort("faultTimeout", outputs[i].faultTimeoutSec);
+        prefs.putUChar("faultMode", outputs[i].faultMode);
+        prefs.putUChar("capPowerPct", outputs[i].capPowerPct);
+        prefs.putBool("autoResume", outputs[i].autoResumeOnSensorOk);
 
         // Save schedule
         for (int j = 0; j < MAX_SCHEDULE_SLOTS; j++) {
@@ -661,4 +728,233 @@ int output_manager_get_output_by_name(const char* name) {
     }
 
     return -1;
+}
+
+/**
+ * Check sensor health status
+ */
+static void checkSensorHealth(int index) {
+    OutputConfig_t* output = &outputs[index];
+
+    // Skip if no sensor assigned or in manual/off mode
+    if (strlen(output->sensorAddress) == 0 ||
+        output->controlMode == CONTROL_MODE_OFF ||
+        output->controlMode == CONTROL_MODE_MANUAL) {
+        output->sensorHealth = SENSOR_OK;
+        return;
+    }
+
+    // Check for invalid reading
+    if (!sensor_manager_is_valid_temp(output->currentTemp)) {
+        if (output->sensorHealth != SENSOR_ERROR) {
+            output->sensorHealth = SENSOR_ERROR;
+            if (output->faultState == FAULT_NONE) {
+                output->faultState = FAULT_SENSOR_ERROR;
+                output->faultStartTime = millis();
+                console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d: SENSOR ERROR", index + 1);
+            }
+        }
+        return;
+    }
+
+    // Check for stale reading
+    unsigned long timeSinceValid = (millis() - output->lastValidReadTime) / 1000;
+    if (timeSinceValid > output->faultTimeoutSec) {
+        if (output->sensorHealth != SENSOR_STALE) {
+            output->sensorHealth = SENSOR_STALE;
+            if (output->faultState == FAULT_NONE) {
+                output->faultState = FAULT_SENSOR_STALE;
+                output->faultStartTime = millis();
+                console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d: SENSOR STALE (%lus)", index + 1, timeSinceValid);
+            }
+        }
+        return;
+    }
+
+    // Sensor is healthy - check if we should auto-resume
+    if (output->sensorHealth != SENSOR_OK) {
+        output->sensorHealth = SENSOR_OK;
+
+        // Auto-resume if configured and fault was sensor-related
+        if (output->autoResumeOnSensorOk &&
+            (output->faultState == FAULT_SENSOR_STALE || output->faultState == FAULT_SENSOR_ERROR)) {
+            output->faultState = FAULT_NONE;
+            console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d: Sensor recovered, resuming", index + 1);
+        }
+    }
+}
+
+/**
+ * Check temperature limits (hard cutoffs)
+ */
+static void checkTemperatureLimits(int index) {
+    OutputConfig_t* output = &outputs[index];
+
+    // Skip if no valid temp or already in fault
+    if (!sensor_manager_is_valid_temp(output->currentTemp)) {
+        return;
+    }
+
+    // Check over-temp (highest priority fault)
+    if (output->currentTemp >= output->maxTempC) {
+        if (output->faultState != FAULT_OVER_TEMP) {
+            output->faultState = FAULT_OVER_TEMP;
+            output->faultStartTime = millis();
+            console_add_event_f(CONSOLE_EVENT_SYSTEM,
+                "Output %d: OVER TEMP! %.1fC >= %.1fC",
+                index + 1, output->currentTemp, output->maxTempC);
+        }
+        return;
+    }
+
+    // Check under-temp
+    if (output->currentTemp <= output->minTempC) {
+        if (output->faultState != FAULT_UNDER_TEMP) {
+            output->faultState = FAULT_UNDER_TEMP;
+            output->faultStartTime = millis();
+            console_add_event_f(CONSOLE_EVENT_SYSTEM,
+                "Output %d: UNDER TEMP! %.1fC <= %.1fC",
+                index + 1, output->currentTemp, output->minTempC);
+        }
+        return;
+    }
+
+    // If we were in over/under temp and now back in range, clear fault
+    if (output->faultState == FAULT_OVER_TEMP || output->faultState == FAULT_UNDER_TEMP) {
+        // Add hysteresis: must be 1C away from limit to clear
+        bool clearOverTemp = (output->faultState == FAULT_OVER_TEMP &&
+                              output->currentTemp < output->maxTempC - 1.0f);
+        bool clearUnderTemp = (output->faultState == FAULT_UNDER_TEMP &&
+                               output->currentTemp > output->minTempC + 1.0f);
+
+        if (clearOverTemp || clearUnderTemp) {
+            output->faultState = FAULT_NONE;
+            console_add_event_f(CONSOLE_EVENT_SYSTEM,
+                "Output %d: Temp back in range (%.1fC)", index + 1, output->currentTemp);
+        }
+    }
+}
+
+/**
+ * Handle active fault state
+ */
+static void handleFaultState(int index) {
+    OutputConfig_t* output = &outputs[index];
+
+    // Over-temp always forces OFF regardless of fault mode
+    if (output->faultState == FAULT_OVER_TEMP) {
+        setOutputPower(index, 0);
+        output->currentPower = 0;
+        output->heating = false;
+        return;
+    }
+
+    // Apply fault mode for other faults
+    switch (output->faultMode) {
+        case FAULT_MODE_OFF:
+            setOutputPower(index, 0);
+            output->currentPower = 0;
+            output->heating = false;
+            break;
+
+        case FAULT_MODE_HOLD_LAST:
+            // Maintain last known good power
+            setOutputPower(index, output->lastValidPower);
+            output->currentPower = output->lastValidPower;
+            output->heating = (output->lastValidPower > 5);
+            break;
+
+        case FAULT_MODE_CAP_POWER:
+            // Cap to configured percentage
+            setOutputPower(index, output->capPowerPct);
+            output->currentPower = output->capPowerPct;
+            output->heating = (output->capPowerPct > 5);
+            break;
+    }
+}
+
+/**
+ * Set safety limits
+ */
+void output_manager_set_safety_limits(int outputIndex, float maxTempC, float minTempC, uint16_t faultTimeoutSec) {
+    if (outputIndex < 0 || outputIndex >= MAX_OUTPUTS) {
+        return;
+    }
+
+    outputs[outputIndex].maxTempC = maxTempC;
+    outputs[outputIndex].minTempC = minTempC;
+    outputs[outputIndex].faultTimeoutSec = faultTimeoutSec;
+
+    console_add_event_f(CONSOLE_EVENT_SYSTEM,
+        "Output %d limits: %.1f-%.1fC, timeout %ds",
+        outputIndex + 1, minTempC, maxTempC, faultTimeoutSec);
+}
+
+/**
+ * Set fault mode
+ */
+void output_manager_set_fault_mode(int outputIndex, FaultMode_t faultMode, uint8_t capPowerPct) {
+    if (outputIndex < 0 || outputIndex >= MAX_OUTPUTS) {
+        return;
+    }
+
+    outputs[outputIndex].faultMode = faultMode;
+    outputs[outputIndex].capPowerPct = capPowerPct;
+}
+
+/**
+ * Clear fault state (manual reset)
+ */
+bool output_manager_clear_fault(int outputIndex) {
+    if (outputIndex < 0 || outputIndex >= MAX_OUTPUTS) {
+        return false;
+    }
+
+    OutputConfig_t* output = &outputs[outputIndex];
+
+    // Can't clear over-temp if still over temp
+    if (output->faultState == FAULT_OVER_TEMP &&
+        sensor_manager_is_valid_temp(output->currentTemp) &&
+        output->currentTemp >= output->maxTempC) {
+        return false;
+    }
+
+    // Can't clear sensor fault if sensor still bad
+    if ((output->faultState == FAULT_SENSOR_ERROR || output->faultState == FAULT_SENSOR_STALE) &&
+        !sensor_manager_is_valid_temp(output->currentTemp)) {
+        return false;
+    }
+
+    output->faultState = FAULT_NONE;
+    output->sensorHealth = SENSOR_OK;
+    console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d: Fault cleared", outputIndex + 1);
+    return true;
+}
+
+/**
+ * Get fault state name
+ */
+const char* output_manager_get_fault_name(FaultState_t fault) {
+    switch (fault) {
+        case FAULT_NONE: return "None";
+        case FAULT_SENSOR_STALE: return "Sensor Stale";
+        case FAULT_SENSOR_ERROR: return "Sensor Error";
+        case FAULT_OVER_TEMP: return "Over Temp";
+        case FAULT_UNDER_TEMP: return "Under Temp";
+        case FAULT_HEATER_NO_RISE: return "Heater No Rise";
+        case FAULT_HEATER_RUNAWAY: return "Heater Runaway";
+        default: return "Unknown";
+    }
+}
+
+/**
+ * Get sensor health name
+ */
+const char* output_manager_get_sensor_health_name(SensorHealth_t health) {
+    switch (health) {
+        case SENSOR_OK: return "OK";
+        case SENSOR_STALE: return "Stale";
+        case SENSOR_ERROR: return "Error";
+        default: return "Unknown";
+    }
 }

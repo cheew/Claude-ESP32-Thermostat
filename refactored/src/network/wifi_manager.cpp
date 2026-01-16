@@ -191,7 +191,7 @@ void wifi_setup_mdns(const char* deviceName) {
         // Add HTTP service
         MDNS.addService("http", "tcp", 80);
         MDNS.addServiceTxt("http", "tcp", "type", "reptile-thermostat");
-        MDNS.addServiceTxt("http", "tcp", "version", "1.3.3");
+        MDNS.addServiceTxt("http", "tcp", "version", "2.2.0");
         MDNS.addServiceTxt("http", "tcp", "name", deviceName);
         
         Serial.println("[WiFi] mDNS responder started successfully");

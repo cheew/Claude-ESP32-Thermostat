@@ -1,8 +1,8 @@
 # ESP32 Thermostat - Future Features & Roadmap
 
-**Document Version:** 1.1
-**Last Updated:** January 13, 2026
-**Current Project Version:** v2.1.1
+**Document Version:** 1.2
+**Last Updated:** January 16, 2026
+**Current Project Version:** v2.2.0 (dev)
 
 ---
 
@@ -12,7 +12,9 @@ Transform the ESP32 thermostat from a single-output heating controller into a **
 - Multiple heating/lighting outputs
 - Multiple temperature sensors
 - Flexible output types (AC dimming, SSR pulse, relay on/off)
-- Guided setup wizard for first-time configuration
+- TFT touch display for standalone operation
+- Optional PIN security for web interface
+- Simple/Advanced web UI modes
 - Professional Android app for remote management
 
 ---
@@ -139,15 +141,75 @@ thermostat/output1/power
 
 ---
 
-## 📺 Priority 2: TFT Display Integration
+## ✅ Priority 2: TFT Display Integration (COMPLETED v2.2.0)
 
 ### Overview
-Add local TFT touch display for standalone operation without requiring web interface access. Display provides:
+**Completed:** Local TFT touch display for standalone operation:
 - **Real-time monitoring** of all 3 outputs
-- **Touch controls** for temperature adjustment
-- **Status indicators** at a glance
+- **Touch controls** for temperature adjustment (+/- 0.5C)
+- **Mode selection** (Off/Manual/PID/OnOff)
+- **Info screen** with WiFi, MQTT, IP details
 - **Offline operation** (no WiFi/network required)
-- **Professional appearance** for visible installations
+
+### Implementation Details
+- Display: ILI9341 240x320 pixels
+- Touch: XPT2046 resistive (calibrated)
+- Library: TFT_eSPI with build flags in platformio.ini
+- Module: `src/hardware/display_manager.cpp`
+
+### Touch Calibration (CRITICAL)
+Touch controller is rotated 90 degrees from display:
+```cpp
+int x = map(p.y, 3800, 200, 0, SCREEN_WIDTH);   // Raw Y -> Screen X
+int y = map(p.x, 200, 3800, 0, SCREEN_HEIGHT);  // Raw X -> Screen Y
+```
+
+---
+
+## ✅ Priority 2b: Web Interface Security (COMPLETED v2.2.0)
+
+### Overview
+**Completed:** Optional PIN-based authentication:
+- Toggleable "Secure Mode" in Settings
+- 4-6 digit PIN stored in preferences
+- Session cookie authentication
+- API login endpoint for Android app
+
+### Protected Routes
+- `/settings`, `/outputs` - Configuration pages
+- `/api/output/*/control` - Temperature/mode changes
+- `/api/restart`, `/api/upload` - System actions
+
+### Public Routes (always accessible)
+- `/api/status`, `/api/outputs`, `/api/sensors` - Read-only data
+- `/`, `/info`, `/history`, `/console` - View pages
+
+---
+
+## ✅ Priority 2c: Simple/Advanced Web UI (COMPLETED v2.2.0)
+
+### Overview
+**Completed:** Two web interface modes:
+
+**Simple Mode (default):**
+- Clean 3-card dashboard
+- Large temperature display
+- Target slider (15-35C)
+- Mode dropdown
+- Power slider (Manual mode)
+
+**Advanced Mode:**
+- Full navigation (Outputs, Sensors, Schedule, etc.)
+- PID tuning, sensor assignment
+- Schedule configuration
+
+Mode toggle via orange dropdown in navigation bar. Preference persists.
+
+---
+
+## 📺 Priority 2 (Original Spec - For Reference)
+
+### Original Hardware Options
 
 ### Hardware Options
 
