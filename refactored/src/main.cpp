@@ -38,6 +38,7 @@
 #include "logger.h"
 #include "temp_history.h"
 #include "console.h"
+#include "safety_manager.h"
 
 // Firmware version
 #define FIRMWARE_VERSION "2.2.0"
@@ -86,6 +87,14 @@ void setup() {
     Serial.println("=== Multi-Output Environmental Control ===");
     logger_add("System boot - v" FIRMWARE_VERSION);
     console_add_event(CONSOLE_EVENT_SYSTEM, "System boot - v" FIRMWARE_VERSION);
+
+    // Initialize safety manager (watchdog, boot loop detection)
+    // Must be early in setup - before hardware that could cause issues
+    bool normalBoot = safety_manager_init();
+    if (!normalBoot) {
+        Serial.println("!!! SAFE MODE ACTIVE - LIMITED FUNCTIONALITY !!!");
+        logger_add("SAFE MODE ACTIVE");
+    }
 
     // Initialize TFT display (3-output support)
     display_init();
@@ -204,9 +213,22 @@ void setup() {
     Serial.println("=== Initialization Complete ===");
     Serial.print("Free heap: ");
     Serial.println(ESP.getFreeHeap());
+
+    // Feed watchdog after successful init
+    safety_manager_feed_watchdog();
 }
 
 void loop() {
+    // Feed watchdog at start of each loop iteration
+    safety_manager_feed_watchdog();
+
+    // Mark boot as stable after 60 seconds of successful operation
+    static bool bootMarkedStable = false;
+    if (!bootMarkedStable && millis() > 60000) {
+        safety_manager_mark_stable();
+        bootMarkedStable = true;
+    }
+
     // Network tasks
     wifi_task();
 

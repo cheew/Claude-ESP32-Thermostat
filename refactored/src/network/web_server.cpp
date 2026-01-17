@@ -9,6 +9,7 @@
 #include "console.h"
 #include "sensor_manager.h"
 #include "output_manager.h"
+#include "safety_manager.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -95,6 +96,12 @@ static void handleSensorName(void);
 
 // v1 API handlers
 static void handleHealthAPI(void);
+
+// Safety page and API handlers
+static void handleSafetyPage(void);
+static void handleSafetyAPI(void);
+static void handleEmergencyStop(void);
+static void handleExitSafeMode(void);
 
 // HTML generation helpers
 static String buildCSS(void);
@@ -542,6 +549,7 @@ void webserver_init(void) {
     server.on("/logs", handleLogs);
     server.on("/console", handleConsole);
     server.on("/settings", handleSettings);
+    server.on("/safety", handleSafetyPage);
 
     // API endpoints
     server.on("/api/status", handleStatus);
@@ -577,6 +585,25 @@ void webserver_init(void) {
     server.on("/api/output/1/clear-fault", HTTP_POST, handleOutputClearFault);
     server.on("/api/output/2/clear-fault", HTTP_POST, handleOutputClearFault);
     server.on("/api/output/3/clear-fault", HTTP_POST, handleOutputClearFault);
+    server.on("/api/output/1/safety", HTTP_POST, handleSafetyAPI);
+    server.on("/api/output/2/safety", HTTP_POST, handleSafetyAPI);
+    server.on("/api/output/3/safety", HTTP_POST, handleSafetyAPI);
+
+    // Safety API routes
+    server.on("/api/safety/state", HTTP_GET, []() {
+        const SafetyState_t* state = safety_manager_get_state();
+        StaticJsonDocument<256> doc;
+        doc["safeMode"] = state->safeMode;
+        doc["safeModeReason"] = safety_manager_get_reason_name(state->safeModeReason);
+        doc["bootCount"] = state->bootCount;
+        doc["watchdogEnabled"] = state->watchdogEnabled;
+        doc["watchdogMarginMs"] = safety_manager_get_watchdog_margin();
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+    });
+    server.on("/api/safety/emergency-stop", HTTP_POST, handleEmergencyStop);
+    server.on("/api/safety/exit-safe-mode", HTTP_POST, handleExitSafeMode);
 
     // v1 API routes (versioned endpoints)
     server.on("/api/v1/health", HTTP_GET, handleHealthAPI);
@@ -2407,8 +2434,9 @@ static String buildNavBar(const char* activePage) {
         nav += "<a href='/console' class='" + String(strcmp(activePage, "console") == 0 ? "active" : "") + "'>🖥️ Console</a>";
     }
 
-    // Settings always visible
+    // Settings and Safety always visible
     nav += "<a href='/settings' class='" + String(strcmp(activePage, "settings") == 0 ? "active" : "") + "'>⚙️ Settings</a>";
+    nav += "<a href='/safety' class='" + String(strcmp(activePage, "safety") == 0 ? "active" : "") + "'>🛡️ Safety</a>";
 
     // Mode toggle dropdown
     nav += "<select class='mode-toggle' onchange='switchUIMode(this.value)'>";
@@ -2554,4 +2582,380 @@ static void handleHealthAPI(void) {
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
+}
+
+// ===== SAFETY PAGE AND API HANDLERS =====
+
+/**
+ * Safety Settings Page
+ * Displays safety parameters, fault status, and emergency controls
+ */
+static void handleSafetyPage(void) {
+    // Protected route
+    if (!isAuthenticated()) { requireAuth(); return; }
+
+    String html = webserver_get_html_header("Safety Settings", "safety");
+
+    // Safe mode banner (if active)
+    const SafetyState_t* safetyState = safety_manager_get_state();
+    if (safetyState->safeMode) {
+        html += "<div style='background:#f44336;color:white;padding:20px;border-radius:8px;margin:20px 0;text-align:center'>";
+        html += "<h2 style='margin:0'>SAFE MODE ACTIVE</h2>";
+        html += "<p style='margin:10px 0'>Reason: " + String(safety_manager_get_reason_name(safetyState->safeModeReason)) + "</p>";
+        html += "<p style='margin:10px 0'>All outputs are disabled for safety.</p>";
+        html += "<button onclick='exitSafeMode()' style='padding:10px 20px;font-size:16px;cursor:pointer'>Exit Safe Mode</button>";
+        html += "</div>";
+    }
+
+    // System Safety Status
+    html += "<h2>System Safety Status</h2>";
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin:20px 0'>";
+
+    // Watchdog status
+    html += "<div style='background:#e3f2fd;padding:15px;border-radius:8px'>";
+    html += "<strong>Watchdog Timer</strong><br>";
+    html += safetyState->watchdogEnabled ? "<span style='color:green'>Active</span>" : "<span style='color:orange'>Disabled</span>";
+    html += "</div>";
+
+    // Boot count
+    html += "<div style='background:#e3f2fd;padding:15px;border-radius:8px'>";
+    html += "<strong>Boot Count</strong><br>";
+    html += String(safetyState->bootCount) + " / " + String(BOOT_LOOP_THRESHOLD);
+    html += "</div>";
+
+    // System status
+    html += "<div style='background:#e3f2fd;padding:15px;border-radius:8px'>";
+    html += "<strong>System Status</strong><br>";
+    html += safetyState->safeMode ? "<span style='color:red'>SAFE MODE</span>" : "<span style='color:green'>Normal</span>";
+    html += "</div>";
+
+    html += "</div>";
+
+    // Emergency Stop Button
+    html += "<div style='background:#ffebee;padding:20px;border-radius:8px;margin:20px 0;text-align:center'>";
+    html += "<button onclick='emergencyStop()' style='background:#f44336;color:white;padding:15px 40px;font-size:18px;border:none;border-radius:8px;cursor:pointer'>";
+    html += "EMERGENCY STOP - All Outputs OFF</button>";
+    html += "<p style='margin:10px 0 0 0;color:#666;font-size:14px'>Immediately disables all heating outputs</p>";
+    html += "</div>";
+
+    // Output selector
+    html += "<h2>Per-Output Safety Settings</h2>";
+    html += "<div style='margin:20px 0;padding:15px;background:#f0f0f0;border-radius:8px'>";
+    html += "<label style='display:flex;align-items:center;gap:10px'>";
+    html += "<strong>Select Output:</strong>";
+    html += "<select id='output-selector' onchange='loadSafetySettings()' style='padding:8px;font-size:16px;border-radius:5px'>";
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (output) {
+            html += "<option value='" + String(i) + "'>" + String(output->name) + " (Output " + String(i + 1) + ")</option>";
+        }
+    }
+    html += "</select></label></div>";
+
+    // Fault Status Panel
+    html += "<div id='fault-status' style='margin:20px 0;padding:20px;background:#fff3e0;border-radius:8px;border-left:4px solid #ff9800'>";
+    html += "<h3 style='margin:0 0 10px 0'>Current Fault Status</h3>";
+    html += "<div id='fault-details'>Loading...</div>";
+    html += "</div>";
+
+    // Safety Parameters Form
+    html += "<div style='background:#f9f9f9;padding:20px;border-radius:8px;margin:20px 0'>";
+    html += "<h3>Safety Limits</h3>";
+
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:15px'>";
+
+    // Max Temperature
+    html += "<div>";
+    html += "<label><strong>Max Temperature (C)</strong><br>";
+    html += "<input type='number' id='maxTempC' min='20' max='80' step='0.5' style='width:100%;padding:8px;margin-top:5px'>";
+    html += "</label>";
+    html += "<p style='color:#666;font-size:12px;margin:5px 0'>Hard cutoff - output forced OFF above this</p>";
+    html += "</div>";
+
+    // Min Temperature
+    html += "<div>";
+    html += "<label><strong>Min Temperature (C)</strong><br>";
+    html += "<input type='number' id='minTempC' min='0' max='30' step='0.5' style='width:100%;padding:8px;margin-top:5px'>";
+    html += "</label>";
+    html += "<p style='color:#666;font-size:12px;margin:5px 0'>Warning threshold - triggers under-temp fault</p>";
+    html += "</div>";
+
+    // Fault Timeout
+    html += "<div>";
+    html += "<label><strong>Sensor Timeout (seconds)</strong><br>";
+    html += "<input type='number' id='faultTimeoutSec' min='10' max='300' step='5' style='width:100%;padding:8px;margin-top:5px'>";
+    html += "</label>";
+    html += "<p style='color:#666;font-size:12px;margin:5px 0'>Time without reading before sensor stale fault</p>";
+    html += "</div>";
+
+    html += "</div>";
+
+    html += "<h3 style='margin-top:20px'>Fault Response</h3>";
+
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:15px'>";
+
+    // Fault Mode
+    html += "<div>";
+    html += "<label><strong>Fault Mode</strong><br>";
+    html += "<select id='faultMode' style='width:100%;padding:8px;margin-top:5px'>";
+    html += "<option value='off'>OFF - Turn output off (safest)</option>";
+    html += "<option value='hold'>HOLD - Maintain last power level</option>";
+    html += "<option value='cap'>CAP - Limit to max power %</option>";
+    html += "</select></label>";
+    html += "</div>";
+
+    // Cap Power
+    html += "<div>";
+    html += "<label><strong>Power Cap (%)</strong><br>";
+    html += "<input type='number' id='capPowerPct' min='0' max='50' step='5' style='width:100%;padding:8px;margin-top:5px'>";
+    html += "</label>";
+    html += "<p style='color:#666;font-size:12px;margin:5px 0'>Max power when in CAP fault mode</p>";
+    html += "</div>";
+
+    // Auto Resume
+    html += "<div>";
+    html += "<label style='display:flex;align-items:center;gap:10px;margin-top:20px'>";
+    html += "<input type='checkbox' id='autoResumeOnSensorOk'>";
+    html += "<span><strong>Auto-resume on sensor recovery</strong><br>";
+    html += "<span style='color:#666;font-size:12px'>Automatically clear sensor faults when sensor returns</span></span>";
+    html += "</label></div>";
+
+    html += "</div>";
+
+    // Save and Reset Buttons
+    html += "<div style='margin-top:20px;display:flex;gap:10px;flex-wrap:wrap'>";
+    html += "<button onclick='saveSafetySettings()' style='background:#4CAF50;color:white;padding:12px 30px;border:none;border-radius:5px;cursor:pointer;font-size:16px'>Save Settings</button>";
+    html += "<button onclick='clearFault()' id='clear-fault-btn' style='background:#ff9800;color:white;padding:12px 30px;border:none;border-radius:5px;cursor:pointer;font-size:16px' disabled>Clear Fault</button>";
+    html += "</div>";
+
+    html += "</div>";
+
+    // Fault Analysis Section
+    html += "<h2>Fault Analysis</h2>";
+    html += "<div id='fault-analysis' style='background:#f9f9f9;padding:20px;border-radius:8px'>";
+    html += "<table style='width:100%;border-collapse:collapse'>";
+    html += "<thead><tr style='background:#e0e0e0'>";
+    html += "<th style='padding:10px;text-align:left'>Field</th>";
+    html += "<th style='padding:10px;text-align:left'>Value</th>";
+    html += "</tr></thead>";
+    html += "<tbody id='fault-analysis-body'></tbody>";
+    html += "</table></div>";
+
+    // JavaScript
+    html += "<script>";
+    html += "let currentOutput=0;";
+
+    // Load safety settings for selected output
+    html += "function loadSafetySettings(){";
+    html += "currentOutput=parseInt(document.getElementById('output-selector').value);";
+    html += "fetch('/api/output/'+(currentOutput+1)).then(r=>r.json()).then(d=>{";
+    // Populate form fields
+    html += "document.getElementById('maxTempC').value=parseFloat(d.safety.maxTempC);";
+    html += "document.getElementById('minTempC').value=parseFloat(d.safety.minTempC);";
+    html += "document.getElementById('faultTimeoutSec').value=d.safety.faultTimeoutSec;";
+    html += "document.getElementById('faultMode').value=d.safety.faultMode;";
+    html += "document.getElementById('capPowerPct').value=d.safety.capPowerPct;";
+    html += "document.getElementById('autoResumeOnSensorOk').checked=d.safety.autoResume;";
+    // Update fault status
+    html += "let faultDiv=document.getElementById('fault-details');";
+    html += "let clearBtn=document.getElementById('clear-fault-btn');";
+    html += "if(d.fault.inFault){";
+    html += "faultDiv.innerHTML='<span style=\"color:red;font-weight:bold\">'+d.fault.state+'</span><br>'+";
+    html += "'Duration: '+(d.fault.durationSec||0)+' seconds<br>'+";
+    html += "'Sensor Health: '+d.fault.sensorHealth;";
+    html += "clearBtn.disabled=false;";
+    html += "document.getElementById('fault-status').style.borderLeftColor='#f44336';";
+    html += "document.getElementById('fault-status').style.background='#ffebee';";
+    html += "}else{";
+    html += "faultDiv.innerHTML='<span style=\"color:green\">No active faults</span>';";
+    html += "clearBtn.disabled=true;";
+    html += "document.getElementById('fault-status').style.borderLeftColor='#4CAF50';";
+    html += "document.getElementById('fault-status').style.background='#e8f5e9';";
+    html += "}";
+    // Update fault analysis table
+    html += "let tbody=document.getElementById('fault-analysis-body');";
+    html += "tbody.innerHTML='';";
+    html += "let rows=[";
+    html += "['Sensor Health',d.fault.sensorHealth],";
+    html += "['Fault State',d.fault.state],";
+    html += "['In Fault',d.fault.inFault?'Yes':'No'],";
+    html += "['Fault Duration (sec)',d.fault.durationSec||'N/A'],";
+    html += "['Current Temperature',d.temp+'C'],";
+    html += "['Current Power',d.power+'%'],";
+    html += "['Control Mode',d.mode],";
+    html += "['Max Temp Limit',d.safety.maxTempC+'C'],";
+    html += "['Min Temp Limit',d.safety.minTempC+'C'],";
+    html += "['Fault Mode',d.safety.faultMode.toUpperCase()],";
+    html += "];";
+    html += "rows.forEach(r=>{";
+    html += "let tr=document.createElement('tr');";
+    html += "tr.innerHTML='<td style=\"padding:8px;border-bottom:1px solid #ddd\">'+r[0]+'</td>'+";
+    html += "'<td style=\"padding:8px;border-bottom:1px solid #ddd\">'+r[1]+'</td>';";
+    html += "tbody.appendChild(tr);});";
+    html += "});}";
+
+    // Save safety settings
+    html += "function saveSafetySettings(){";
+    html += "let data={";
+    html += "maxTempC:parseFloat(document.getElementById('maxTempC').value),";
+    html += "minTempC:parseFloat(document.getElementById('minTempC').value),";
+    html += "faultTimeoutSec:parseInt(document.getElementById('faultTimeoutSec').value),";
+    html += "faultMode:document.getElementById('faultMode').value,";
+    html += "capPowerPct:parseInt(document.getElementById('capPowerPct').value),";
+    html += "autoResumeOnSensorOk:document.getElementById('autoResumeOnSensorOk').checked";
+    html += "};";
+    html += "fetch('/api/output/'+(currentOutput+1)+'/safety',{method:'POST',";
+    html += "headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})";
+    html += ".then(r=>r.json()).then(d=>{";
+    html += "if(d.ok){alert('Safety settings saved!');loadSafetySettings();}";
+    html += "else{alert('Error: '+(d.error?.message||'Unknown error'));}";
+    html += "});}";
+
+    // Clear fault
+    html += "function clearFault(){";
+    html += "if(!confirm('Clear fault for this output?'))return;";
+    html += "fetch('/api/output/'+(currentOutput+1)+'/clear-fault',{method:'POST'})";
+    html += ".then(r=>r.json()).then(d=>{";
+    html += "if(d.ok){alert('Fault cleared!');loadSafetySettings();}";
+    html += "else{alert('Cannot clear: '+(d.error?.message||'Conditions still exist'));}";
+    html += "});}";
+
+    // Emergency stop
+    html += "function emergencyStop(){";
+    html += "if(!confirm('EMERGENCY STOP\\n\\nThis will immediately turn OFF all heating outputs.\\n\\nContinue?'))return;";
+    html += "fetch('/api/safety/emergency-stop',{method:'POST'})";
+    html += ".then(r=>r.json()).then(d=>{";
+    html += "if(d.ok){alert('All outputs disabled!');location.reload();}";
+    html += "else{alert('Error: '+d.error);}";
+    html += "});}";
+
+    // Exit safe mode
+    html += "function exitSafeMode(){";
+    html += "if(!confirm('Exit safe mode?\\n\\nOutputs will return to their configured modes.'))return;";
+    html += "fetch('/api/safety/exit-safe-mode',{method:'POST'})";
+    html += ".then(r=>r.json()).then(d=>{";
+    html += "if(d.ok){alert('Exited safe mode');location.reload();}";
+    html += "else{alert('Error: '+d.error);}";
+    html += "});}";
+
+    // Auto-refresh fault status
+    html += "setInterval(loadSafetySettings,5000);";
+    html += "loadSafetySettings();";
+    html += "</script>";
+
+    html += webserver_get_html_footer(millis() / 1000);
+    server.send(200, "text/html", html);
+}
+
+/**
+ * POST /api/output/{id}/safety - Update safety settings for an output
+ */
+static void handleSafetyAPI(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"ok\":false,\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"Authentication required\"}}");
+        return;
+    }
+
+    String path = server.uri();
+    // Extract output ID from path like /api/output/1/safety
+    int slashPos = path.indexOf("/output/") + 8;
+    int outputId = path.substring(slashPos, slashPos + 1).toInt();
+    int outputIndex = outputId - 1;
+
+    if (outputIndex < 0 || outputIndex >= 3) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":{\"code\":\"INVALID_OUTPUT\",\"message\":\"Invalid output ID\"}}");
+        return;
+    }
+
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":{\"code\":\"NO_DATA\",\"message\":\"No data received\"}}");
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+    if (error) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":{\"code\":\"INVALID_JSON\",\"message\":\"Invalid JSON\"}}");
+        return;
+    }
+
+    OutputConfig_t* output = output_manager_get_output(outputIndex);
+    if (!output) {
+        server.send(404, "application/json", "{\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"Output not found\"}}");
+        return;
+    }
+
+    // Update safety limits
+    float maxTempC = doc["maxTempC"] | output->maxTempC;
+    float minTempC = doc["minTempC"] | output->minTempC;
+    uint16_t faultTimeoutSec = doc["faultTimeoutSec"] | output->faultTimeoutSec;
+
+    // Validate ranges
+    if (maxTempC < 20 || maxTempC > 80) maxTempC = output->maxTempC;
+    if (minTempC < 0 || minTempC > 30) minTempC = output->minTempC;
+    if (faultTimeoutSec < 10 || faultTimeoutSec > 300) faultTimeoutSec = output->faultTimeoutSec;
+    if (maxTempC <= minTempC) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":{\"code\":\"INVALID_RANGE\",\"message\":\"maxTempC must be greater than minTempC\"}}");
+        return;
+    }
+
+    output_manager_set_safety_limits(outputIndex, maxTempC, minTempC, faultTimeoutSec);
+
+    // Update fault mode
+    if (doc.containsKey("faultMode")) {
+        const char* modeStr = doc["faultMode"];
+        FaultMode_t faultMode = FAULT_MODE_OFF;
+        if (strcmp(modeStr, "hold") == 0) faultMode = FAULT_MODE_HOLD_LAST;
+        else if (strcmp(modeStr, "cap") == 0) faultMode = FAULT_MODE_CAP_POWER;
+
+        uint8_t capPowerPct = doc["capPowerPct"] | output->capPowerPct;
+        if (capPowerPct > 50) capPowerPct = 50;  // Cap at 50% for safety
+
+        output_manager_set_fault_mode(outputIndex, faultMode, capPowerPct);
+    }
+
+    // Update auto-resume setting
+    if (doc.containsKey("autoResumeOnSensorOk")) {
+        output->autoResumeOnSensorOk = doc["autoResumeOnSensorOk"];
+    }
+
+    // Save to NVS
+    output_manager_save_config();
+
+    console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d safety settings updated via web", outputIndex + 1);
+
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
+/**
+ * POST /api/safety/emergency-stop - Emergency stop all outputs
+ */
+static void handleEmergencyStop(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"ok\":false,\"error\":\"Unauthorized\"}");
+        return;
+    }
+
+    safety_manager_emergency_stop();
+    server.send(200, "application/json", "{\"ok\":true,\"message\":\"All outputs disabled\"}");
+}
+
+/**
+ * POST /api/safety/exit-safe-mode - Exit safe mode
+ */
+static void handleExitSafeMode(void) {
+    // Protected route
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"ok\":false,\"error\":\"Unauthorized\"}");
+        return;
+    }
+
+    if (safety_manager_exit_safe_mode()) {
+        server.send(200, "application/json", "{\"ok\":true,\"message\":\"Exited safe mode\"}");
+    } else {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"Cannot exit safe mode\"}");
+    }
 }

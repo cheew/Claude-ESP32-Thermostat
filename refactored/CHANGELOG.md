@@ -2,6 +2,60 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.2.1] - 2026-01-17
+
+### Added
+- **Hardware Watchdog Timer**: ESP32 task watchdog for system reliability
+  - 30-second timeout with automatic reset on hang
+  - Prevents frozen state with heater stuck ON
+  - Fed at start of each main loop iteration
+- **Boot Loop Detection & Safe Mode**: Protection against crash loops
+  - Tracks boot count in NVS flash
+  - Enters SAFE MODE after 3 rapid reboots
+  - All outputs forced OFF in safe mode
+  - Web UI shows safe mode banner with exit option
+  - Boot marked stable after 60 seconds of normal operation
+- **Safety Settings Page**: Dedicated UI for safety configuration (`/safety`)
+  - System safety status display (watchdog, boot count, safe mode)
+  - Emergency Stop button (all outputs OFF immediately)
+  - Per-output safety parameter configuration
+  - Real-time fault status with color coding
+  - Fault analysis table with all safety-related data
+  - Manual fault clear with validation
+  - Auto-refresh every 5 seconds
+- **Safety Manager Module**: New `safety_manager.cpp/.h` module
+  - Centralized safety system management
+  - Functions: init, feed_watchdog, mark_stable, emergency_stop
+  - Safe mode entry/exit with NVS persistence
+- **Safety API Endpoints**:
+  - `GET /api/safety/state` - Get safety system state
+  - `POST /api/output/{n}/safety` - Update output safety settings
+  - `POST /api/safety/emergency-stop` - Emergency stop all outputs
+  - `POST /api/safety/exit-safe-mode` - Exit safe mode
+- **SAFETY_FEATURES.md**: Comprehensive safety documentation
+  - Documents all implemented safety mechanisms
+  - Future work section for planned features
+  - API reference for safety endpoints
+
+### Changed
+- Navigation bar now includes Safety link (always visible)
+- Safety Settings UI Page marked as implemented in documentation
+
+### Files Added
+- `include/safety_manager.h` - Safety manager header
+- `src/utils/safety_manager.cpp` - Safety manager implementation
+- `SAFETY_FEATURES.md` - Safety documentation
+
+### Files Modified
+- `src/main.cpp` - Watchdog integration, stable boot marking
+- `src/network/web_server.cpp` - Safety page + API endpoints + nav link
+
+### Memory Usage
+- Flash: 93.1% (1,220,061 / 1,310,720 bytes) - ~90 KB remaining
+- RAM: 20.2% (66,284 / 327,680 bytes) - ~261 KB free
+
+---
+
 ## [2.2.0] - 2026-01-16
 
 ### Added
