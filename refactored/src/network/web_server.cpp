@@ -352,6 +352,9 @@ void webserver_init(void) {
         html += "document.getElementById('out-kp').value=d.pid.kp;";
         html += "document.getElementById('out-ki').value=d.pid.ki;";
         html += "document.getElementById('out-kd').value=d.pid.kd;";
+        html += "document.getElementById('out-tp-cycle').value=d.timeProp.cycleSec;";
+        html += "document.getElementById('out-tp-min-on').value=d.timeProp.minOnSec;";
+        html += "document.getElementById('out-tp-min-off').value=d.timeProp.minOffSec;";
         html += "document.getElementById('device-info').innerHTML='<strong>Device:</strong> '+d.deviceType+' | <strong>Hardware:</strong> '+d.hardwareType;";
         html += "});}";
         html += "function saveConfig(){let data={";
@@ -360,7 +363,10 @@ void webserver_init(void) {
         html += "sensor:document.getElementById('out-sensor').value,";
         html += "pid:{kp:parseFloat(document.getElementById('out-kp').value),";
         html += "ki:parseFloat(document.getElementById('out-ki').value),";
-        html += "kd:parseFloat(document.getElementById('out-kd').value)}};";
+        html += "kd:parseFloat(document.getElementById('out-kd').value)},";
+        html += "timeProp:{cycleSec:parseInt(document.getElementById('out-tp-cycle').value),";
+        html += "minOnSec:parseInt(document.getElementById('out-tp-min-on').value),";
+        html += "minOffSec:parseInt(document.getElementById('out-tp-min-off').value)}};";
         html += "fetch('/api/output/'+currentOutput+'/config',{method:'POST',";
         html += "headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})";
         html += ".then(()=>alert('Saved!'));}";
@@ -464,6 +470,7 @@ void webserver_init(void) {
         html += "<option value='manual'>Manual</option>";
         html += "<option value='pid'>PID (Auto)</option>";
         html += "<option value='onoff'>On/Off Thermostat</option>";
+        html += "<option value='timeprop'>Time-Proportional</option>";
         html += "<option value='schedule'>Schedule</option>";
         html += "</select></label></div>";
         html += "<div style='margin:10px 0'><label>Manual Power (%): <input type='number' id='out-power' min='0' max='100' style='width:100px'></label></div>";
@@ -477,7 +484,16 @@ void webserver_init(void) {
         html += "<div style='margin:10px 0'><label>Kp (Proportional): <input type='number' id='out-kp' step='0.1' style='width:100px'></label></div>";
         html += "<div style='margin:10px 0'><label>Ki (Integral): <input type='number' id='out-ki' step='0.01' style='width:100px'></label></div>";
         html += "<div style='margin:10px 0'><label>Kd (Derivative): <input type='number' id='out-kd' step='0.1' style='width:100px'></label></div>";
-        html += "<p style='color:#666;font-size:14px'>💡 PID tuning affects auto (PID) mode. Start with Kp=10, Ki=0.5, Kd=2 and adjust based on performance.</p>";
+        html += "<p style='color:#666;font-size:14px'>PID tuning affects PID and Time-Proportional modes. Start with Kp=10, Ki=0.5, Kd=2.</p>";
+        html += "</div>";
+
+        // Time-Proportional Settings
+        html += "<button onclick='document.getElementById(\"timeprop-settings\").style.display=document.getElementById(\"timeprop-settings\").style.display===\"none\"?\"block\":\"none\";this.innerText=this.innerText.includes(\"Show\")?\"Hide Time-Prop Settings\":\"Show Time-Prop Settings\"' style='margin:10px 0;padding:10px 15px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer'>Show Time-Prop Settings</button>";
+        html += "<div id='timeprop-settings' style='display:none;margin-top:10px;padding:15px;background:#fff3e0;border-radius:5px'>";
+        html += "<div style='margin:10px 0'><label>Cycle Time (sec): <input type='number' id='out-tp-cycle' min='5' max='120' value='30' style='width:100px'></label></div>";
+        html += "<div style='margin:10px 0'><label>Min ON Time (sec): <input type='number' id='out-tp-min-on' min='1' max='30' value='1' style='width:100px'></label></div>";
+        html += "<div style='margin:10px 0'><label>Min OFF Time (sec): <input type='number' id='out-tp-min-off' min='1' max='30' value='1' style='width:100px'></label></div>";
+        html += "<p style='color:#666;font-size:14px'>Time-proportional converts PID output into ON/OFF cycles. 60% duty with 30s cycle = 18s ON, 12s OFF. Longer cycles (30-60s) reduce relay wear.</p>";
         html += "</div>";
 
         html += "</div>";
@@ -852,6 +868,7 @@ static void handleRoot(void) {
             html += "<option value='manual'" + String(output->controlMode == CONTROL_MODE_MANUAL ? " selected" : "") + ">Manual</option>";
             html += "<option value='pid'" + String(output->controlMode == CONTROL_MODE_PID ? " selected" : "") + ">PID (Auto)</option>";
             html += "<option value='onoff'" + String(output->controlMode == CONTROL_MODE_ONOFF ? " selected" : "") + ">On/Off</option>";
+            html += "<option value='timeprop'" + String(output->controlMode == CONTROL_MODE_TIME_PROP ? " selected" : "") + ">Time-Prop</option>";
             html += "</select>";
             html += "</div>";
 
@@ -2020,7 +2037,7 @@ static void handleOutputAPI(void) {
         return;
     }
 
-    StaticJsonDocument<768> doc;
+    StaticJsonDocument<1024> doc;
     doc["id"] = outputId;
     doc["name"] = output->name;
     doc["enabled"] = output->enabled;
@@ -2039,6 +2056,14 @@ static void handleOutputAPI(void) {
     pid["kp"] = serialized(String(output->pidKp, 2));
     pid["ki"] = serialized(String(output->pidKi, 2));
     pid["kd"] = serialized(String(output->pidKd, 2));
+
+    // Time-proportional parameters
+    JsonObject timeProp = doc.createNestedObject("timeProp");
+    timeProp["cycleSec"] = output->timePropCycleSec;
+    timeProp["minOnSec"] = output->timePropMinOnSec;
+    timeProp["minOffSec"] = output->timePropMinOffSec;
+    timeProp["dutyCycle"] = serialized(String(output->timePropDutyCycle, 1));
+    timeProp["cycleState"] = output->timePropCurrentState;
 
     // Safety settings
     JsonObject safety = doc.createNestedObject("safety");
@@ -2122,6 +2147,7 @@ static void handleOutputControl(void) {
         else if (strcmp(modeStr, "manual") == 0) mode = CONTROL_MODE_MANUAL;
         else if (strcmp(modeStr, "pid") == 0 || strcmp(modeStr, "auto") == 0) mode = CONTROL_MODE_PID;
         else if (strcmp(modeStr, "onoff") == 0) mode = CONTROL_MODE_ONOFF;
+        else if (strcmp(modeStr, "timeprop") == 0) mode = CONTROL_MODE_TIME_PROP;
         else if (strcmp(modeStr, "schedule") == 0) mode = CONTROL_MODE_SCHEDULE;
 
         output_manager_set_mode(outputIndex, mode);
@@ -2196,6 +2222,15 @@ static void handleOutputConfig(void) {
         float ki = pid["ki"];
         float kd = pid["kd"];
         output_manager_set_pid_params(outputIndex, kp, ki, kd);
+    }
+
+    // Update time-proportional parameters
+    if (doc.containsKey("timeProp")) {
+        JsonObject tp = doc["timeProp"];
+        uint8_t cycleSec = tp["cycleSec"] | 30;
+        uint8_t minOnSec = tp["minOnSec"] | 1;
+        uint8_t minOffSec = tp["minOffSec"] | 1;
+        output_manager_set_time_prop_params(outputIndex, cycleSec, minOnSec, minOffSec);
     }
 
     // Update schedule

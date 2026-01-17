@@ -1,6 +1,6 @@
 # ESP32 Multi-Output Thermostat - Quick Reference
 
-**Version:** 2.2.1 | **Platform:** ESP32 + PlatformIO
+**Version:** 2.3.0 | **Platform:** ESP32 + PlatformIO
 
 ## What This Is
 Reptile habitat controller with 3 independent heating outputs, TFT touchscreen, web UI, MQTT/Home Assistant integration.
@@ -59,6 +59,8 @@ platformio.ini               # Build config (ESP32)
 
 ## Current Development Status
 - ✅ 3-output control with independent modes
+- ✅ Time-proportional control mode (v2.3.0)
+- ✅ TFT partial updates - no screen flashing (v2.3.0)
 - ✅ Sensor fault detection + safety cutoffs (v2.2.0)
 - ✅ Hardware watchdog + boot loop detection (v2.2.1)
 - ✅ Safety Settings page with emergency stop (v2.2.1)

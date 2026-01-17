@@ -2,6 +2,38 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.3.0] - 2026-01-17
+
+### Added
+- **Time-Proportional Control Mode**: New control mode for equipment-friendly temperature control
+  - Converts PID output (0-100%) into timed ON/OFF cycles
+  - Configurable cycle time (5-120 seconds, default 30s)
+  - Configurable minimum ON/OFF times to prevent rapid cycling
+  - Longer cycles reduce relay wear and are better for heaters
+  - PID runs continuously (~100ms) for responsive temperature tracking
+  - Cycle timer runs independently for stable ON/OFF switching
+  - Added to web UI mode dropdown and TFT display mode cycling
+- **4-Channel SSR GPIO Wiring Schedule**: Documented GPIO assignments for 4-channel high-trigger SSR modules
+  - GPIO 16, 17, 26, 12 identified as suitable output pins
+  - Avoids strapping pins and input-only GPIOs
+
+### Changed
+- **TFT Display Partial Updates**: Eliminated screen flashing during updates
+  - Only redraws elements that have actually changed
+  - Tracks previous values for temperature, target, power, heating state, and mode
+  - Implemented `drawMainScreenPartial()` and `drawControlScreenPartial()` functions
+  - Background only cleared on full screen transitions
+- Updated `output_manager_get_mode_name()` to return "TimeProp" and "OnOff" (no hyphens) for dropdown matching
+
+### Files Modified
+- `include/output_manager.h` - Added `CONTROL_MODE_TIME_PROP` enum, time-prop struct fields, `output_manager_set_time_prop_params()` declaration
+- `src/control/output_manager.cpp` - Implemented `updateTimeProp()`, `resetTimePropState()`, load/save for time-prop params
+- `src/network/web_server.cpp` - Time-prop mode in dropdowns, config section with cycle time inputs, API handling
+- `src/hardware/display_manager.cpp` - Partial screen update functions, change tracking variables
+- `src/main.cpp` - Added timeprop to display mode callback
+
+---
+
 ## [2.2.1] - 2026-01-17
 
 ### Added

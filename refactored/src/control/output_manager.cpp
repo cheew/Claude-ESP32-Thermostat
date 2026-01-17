@@ -35,6 +35,8 @@ static dimmerLamp* dimmer1 = nullptr;  // Output 1 (AC dimmer)
 // Forward declarations
 static void updateOutput(int index);
 static void updatePID(int index);
+static void updateTimeProp(int index);
+static void resetTimePropState(int index);
 static void updateSchedule(int index);
 static void setOutputPower(int index, int power);
 static void checkSensorHealth(int index);
@@ -64,6 +66,14 @@ void output_manager_init(void) {
         outputs[i].lastValidTemp = 20.0f;
         outputs[i].lastValidPower = 0;
         outputs[i].faultStartTime = 0;
+
+        // Time-proportional defaults
+        outputs[i].timePropCycleSec = 30;      // 30 second default cycle
+        outputs[i].timePropMinOnSec = 1;       // 1 second minimum ON
+        outputs[i].timePropMinOffSec = 1;      // 1 second minimum OFF
+        outputs[i].timePropCycleStart = 0;
+        outputs[i].timePropCurrentState = false;
+        outputs[i].timePropDutyCycle = 0.0f;
     }
 
     // Initialize Output 1 (AC Dimmer for lights)
@@ -239,6 +249,17 @@ static void updateOutput(int index) {
             updateSchedule(index);
             output->lastValidPower = output->currentPower;  // Track for fault recovery
             break;
+
+        case CONTROL_MODE_TIME_PROP:
+            if (sensor_manager_is_valid_temp(output->currentTemp)) {
+                updateTimeProp(index);
+                output->lastValidPower = output->currentPower;  // Track for fault recovery
+            } else {
+                setOutputPower(index, 0);
+                output->currentPower = 0;
+                output->heating = false;
+            }
+            break;
     }
 }
 
@@ -296,6 +317,104 @@ static void updatePID(int index) {
     // Update state
     output->pidLastError = error;
     output->pidLastTime = now;
+}
+
+/**
+ * Reset time-proportional cycle state
+ */
+static void resetTimePropState(int index) {
+    OutputConfig_t* output = &outputs[index];
+    output->timePropCycleStart = millis();
+    output->timePropCurrentState = false;
+    output->timePropDutyCycle = 0.0f;
+}
+
+/**
+ * Update time-proportional control
+ * Converts PID output percentage into timed ON/OFF cycles
+ * PID runs continuously, duty cycle applied to fixed-length cycles
+ */
+static void updateTimeProp(int index) {
+    OutputConfig_t* output = &outputs[index];
+    unsigned long now = millis();
+
+    // Calculate cycle duration in milliseconds
+    unsigned long cycleDurationMs = (unsigned long)output->timePropCycleSec * 1000UL;
+
+    // Always run PID calculation (every ~100ms update) for responsive control
+    float dt = (now - output->pidLastTime) / 1000.0f;
+    if (dt >= 0.1f) {
+        float error = output->targetTemp - output->currentTemp;
+
+        // Proportional
+        float P = output->pidKp * error;
+
+        // Integral with anti-windup
+        output->pidIntegral += error * dt;
+        if (output->pidIntegral > PID_INTEGRAL_MAX) {
+            output->pidIntegral = PID_INTEGRAL_MAX;
+        } else if (output->pidIntegral < -PID_INTEGRAL_MAX) {
+            output->pidIntegral = -PID_INTEGRAL_MAX;
+        }
+        float I = output->pidKi * output->pidIntegral;
+
+        // Derivative
+        float D = 0.0f;
+        if (dt > 0.0f) {
+            D = output->pidKd * (error - output->pidLastError) / dt;
+        }
+
+        // Calculate and clamp duty cycle
+        output->timePropDutyCycle = P + I + D;
+        if (output->timePropDutyCycle < 0) output->timePropDutyCycle = 0;
+        if (output->timePropDutyCycle > 100) output->timePropDutyCycle = 100;
+
+        output->pidLastError = error;
+        output->pidLastTime = now;
+    }
+
+    // Check if we need to start a new cycle (separate from PID calculation)
+    if (output->timePropCycleStart == 0 || (now - output->timePropCycleStart >= cycleDurationMs)) {
+        output->timePropCycleStart = now;
+    }
+
+    // Calculate ON time for this cycle based on current duty cycle
+    unsigned long onTimeMs = (unsigned long)((output->timePropDutyCycle / 100.0f) * cycleDurationMs);
+    unsigned long minOnMs = (unsigned long)output->timePropMinOnSec * 1000UL;
+    unsigned long minOffMs = (unsigned long)output->timePropMinOffSec * 1000UL;
+
+    // Apply minimum on/off time constraints
+    if (onTimeMs > 0 && onTimeMs < minOnMs) {
+        onTimeMs = minOnMs;  // Ensure minimum ON time
+    }
+    if (onTimeMs > cycleDurationMs - minOffMs) {
+        onTimeMs = cycleDurationMs - minOffMs;  // Ensure minimum OFF time
+    }
+
+    // Special cases for very low or very high duty cycles
+    if (output->timePropDutyCycle < 2.0f) {
+        onTimeMs = 0;  // Too low, stay off entirely
+    }
+    if (output->timePropDutyCycle > 98.0f) {
+        onTimeMs = cycleDurationMs;  // Nearly full, stay on entirely
+    }
+
+    // Determine current state based on time within cycle
+    unsigned long timeInCycle = now - output->timePropCycleStart;
+    bool shouldBeOn = (timeInCycle < onTimeMs);
+
+    // Set output state
+    if (shouldBeOn) {
+        setOutputPower(index, 100);
+        output->currentPower = (int)output->timePropDutyCycle;  // Show duty cycle %
+        output->heating = true;
+    } else {
+        setOutputPower(index, 0);
+        output->currentPower = (int)output->timePropDutyCycle;  // Still show duty cycle %
+        output->heating = false;
+    }
+
+    output->timePropCurrentState = shouldBeOn;
 }
 
 /**
@@ -462,6 +581,11 @@ void output_manager_set_mode(int outputIndex, ControlMode_t mode) {
     outputs[outputIndex].pidLastError = 0.0f;
     outputs[outputIndex].pidLastTime = millis();
 
+    // Reset time-prop state when entering that mode
+    if (mode == CONTROL_MODE_TIME_PROP) {
+        resetTimePropState(outputIndex);
+    }
+
     console_add_event_f(CONSOLE_EVENT_SYSTEM, "Output %d mode: %s",
                        outputIndex + 1, output_manager_get_mode_name(mode));
 }
@@ -514,6 +638,34 @@ void output_manager_set_pid_params(int outputIndex, float kp, float ki, float kd
 
     // Reset integral
     outputs[outputIndex].pidIntegral = 0.0f;
+}
+
+/**
+ * Set time-proportional control parameters
+ */
+void output_manager_set_time_prop_params(int outputIndex, uint8_t cycleSec,
+                                          uint8_t minOnSec, uint8_t minOffSec) {
+    if (outputIndex < 0 || outputIndex >= MAX_OUTPUTS) {
+        return;
+    }
+
+    // Clamp cycle time to valid range (5-120 seconds)
+    if (cycleSec < 5) cycleSec = 5;
+    if (cycleSec > 120) cycleSec = 120;
+
+    // Ensure min times don't exceed half the cycle
+    uint8_t maxMinTime = cycleSec / 2;
+    if (minOnSec > maxMinTime) minOnSec = maxMinTime;
+    if (minOffSec > maxMinTime) minOffSec = maxMinTime;
+    if (minOnSec < 1) minOnSec = 1;
+    if (minOffSec < 1) minOffSec = 1;
+
+    outputs[outputIndex].timePropCycleSec = cycleSec;
+    outputs[outputIndex].timePropMinOnSec = minOnSec;
+    outputs[outputIndex].timePropMinOffSec = minOffSec;
+
+    // Reset cycle state
+    resetTimePropState(outputIndex);
 }
 
 /**
@@ -573,6 +725,11 @@ void output_manager_load_config(void) {
         outputs[i].pidKi = prefs.getFloat("pidKi", outputs[i].pidKi);
         outputs[i].pidKd = prefs.getFloat("pidKd", outputs[i].pidKd);
 
+        // Load time-proportional params
+        outputs[i].timePropCycleSec = prefs.getUChar("tpCycleSec", 30);
+        outputs[i].timePropMinOnSec = prefs.getUChar("tpMinOnSec", 1);
+        outputs[i].timePropMinOffSec = prefs.getUChar("tpMinOffSec", 1);
+
         // Load safety settings
         outputs[i].maxTempC = prefs.getFloat("maxTempC", DEFAULT_MAX_TEMP_C);
         outputs[i].minTempC = prefs.getFloat("minTempC", DEFAULT_MIN_TEMP_C);
@@ -628,6 +785,11 @@ void output_manager_save_config(void) {
         prefs.putFloat("pidKp", outputs[i].pidKp);
         prefs.putFloat("pidKi", outputs[i].pidKi);
         prefs.putFloat("pidKd", outputs[i].pidKd);
+
+        // Save time-proportional params
+        prefs.putUChar("tpCycleSec", outputs[i].timePropCycleSec);
+        prefs.putUChar("tpMinOnSec", outputs[i].timePropMinOnSec);
+        prefs.putUChar("tpMinOffSec", outputs[i].timePropMinOffSec);
 
         // Save safety settings
         prefs.putFloat("maxTempC", outputs[i].maxTempC);
@@ -694,8 +856,9 @@ const char* output_manager_get_mode_name(ControlMode_t mode) {
         case CONTROL_MODE_OFF: return "Off";
         case CONTROL_MODE_MANUAL: return "Manual";
         case CONTROL_MODE_PID: return "PID";
-        case CONTROL_MODE_ONOFF: return "On/Off";
+        case CONTROL_MODE_ONOFF: return "OnOff";
         case CONTROL_MODE_SCHEDULE: return "Schedule";
+        case CONTROL_MODE_TIME_PROP: return "TimeProp";
         default: return "Unknown";
     }
 }

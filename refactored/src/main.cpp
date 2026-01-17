@@ -146,6 +146,7 @@ void setup() {
         else if (strcmp(mode, "manual") == 0) modeEnum = CONTROL_MODE_MANUAL;
         else if (strcmp(mode, "pid") == 0) modeEnum = CONTROL_MODE_PID;
         else if (strcmp(mode, "onoff") == 0) modeEnum = CONTROL_MODE_ONOFF;
+        else if (strcmp(mode, "timeprop") == 0) modeEnum = CONTROL_MODE_TIME_PROP;
         else if (strcmp(mode, "schedule") == 0) modeEnum = CONTROL_MODE_SCHEDULE;
 
         output_manager_set_mode(outputId, modeEnum);

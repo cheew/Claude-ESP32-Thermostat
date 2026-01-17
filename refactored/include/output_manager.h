@@ -75,7 +75,8 @@ typedef enum {
     CONTROL_MODE_MANUAL,      // Manual power setting
     CONTROL_MODE_PID,         // PID temperature control
     CONTROL_MODE_ONOFF,       // Simple thermostat (on/off)
-    CONTROL_MODE_SCHEDULE     // Schedule-based control
+    CONTROL_MODE_SCHEDULE,    // Schedule-based control
+    CONTROL_MODE_TIME_PROP    // Time-proportional control (PID with timed cycles)
 } ControlMode_t;
 
 /**
@@ -114,6 +115,16 @@ typedef struct {
     float pidIntegral;
     float pidLastError;
     unsigned long pidLastTime;
+
+    // Time-proportional control parameters
+    uint8_t timePropCycleSec;         // Cycle period in seconds (5-120, default 30)
+    uint8_t timePropMinOnSec;         // Minimum ON time in seconds (default 1)
+    uint8_t timePropMinOffSec;        // Minimum OFF time in seconds (default 1)
+
+    // Time-proportional runtime state
+    unsigned long timePropCycleStart; // millis() when current cycle started
+    bool timePropCurrentState;        // Current ON/OFF state within cycle
+    float timePropDutyCycle;          // Current calculated duty cycle (0-100%)
 
     // Schedule
     ScheduleSlot_t schedule[MAX_SCHEDULE_SLOTS];
@@ -220,6 +231,16 @@ void output_manager_set_sensor(int outputIndex, const char* sensorAddress);
  * @param kd Derivative gain
  */
 void output_manager_set_pid_params(int outputIndex, float kp, float ki, float kd);
+
+/**
+ * Set time-proportional control parameters
+ * @param outputIndex Output index (0-2)
+ * @param cycleSec Cycle period in seconds (5-120)
+ * @param minOnSec Minimum ON time in seconds
+ * @param minOffSec Minimum OFF time in seconds
+ */
+void output_manager_set_time_prop_params(int outputIndex, uint8_t cycleSec,
+                                          uint8_t minOnSec, uint8_t minOffSec);
 
 /**
  * Set schedule slot

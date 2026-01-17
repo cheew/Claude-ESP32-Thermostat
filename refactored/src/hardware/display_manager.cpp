@@ -16,12 +16,21 @@ static bool initialized = false;
 static bool sleeping = false;
 static uint8_t brightness = 100;
 static DisplayScreen currentScreen = SCREEN_MAIN;
+static DisplayScreen previousScreen = SCREEN_MAIN;  // Track screen changes for full redraw
 static int selectedOutput = 0;  // Which output is being adjusted (0-2)
 static bool needsRefresh = true;  // Flag to trigger refresh only when needed
+static bool needsFullRedraw = true;  // Flag for full screen redraw (on screen change)
 static unsigned long lastUpdate = 0;
 static unsigned long lastTouch = 0;
 static unsigned long lastInteraction = 0;
 static unsigned long lastButtonPress = 0;
+
+// Previous values for partial updates (to detect changes)
+static float prevCurrentTemp[3] = {-999, -999, -999};
+static float prevTargetTemp[3] = {-999, -999, -999};
+static int prevPower[3] = {-1, -1, -1};
+static bool prevHeating[3] = {false, false, false};
+static char prevMode[3][16] = {"", "", ""};
 
 // Output data (3 outputs)
 static DisplayOutputData outputs[3] = {0};
@@ -43,11 +52,14 @@ static const unsigned long BUTTON_DEBOUNCE = 300;  // 300ms debounce
 
 // Forward declarations
 static void drawMainScreen(void);
+static void drawMainScreenPartial(void);  // Partial update for main screen
 static void drawControlScreen(void);
+static void drawControlScreenPartial(void);  // Partial update for control screen
 static void drawInfoScreen(void);
 static void handleTouch(void);
 static void handleControlTouch(int x, int y);
 static uint16_t getHeatColor(int power);
+static void invalidatePreviousValues(void);  // Force full redraw next time
 
 /**
  * Initialize display and touch screen
@@ -227,12 +239,30 @@ void display_sleep(bool enable) {
 void display_refresh(void) {
     if (!initialized || sleeping) return;
 
+    // Check if screen changed - need full redraw
+    bool screenChanged = (currentScreen != previousScreen);
+    if (screenChanged) {
+        needsFullRedraw = true;
+        previousScreen = currentScreen;
+        invalidatePreviousValues();
+    }
+
     switch (currentScreen) {
         case SCREEN_MAIN:
-            drawMainScreen();
+            if (needsFullRedraw) {
+                drawMainScreen();
+                needsFullRedraw = false;
+            } else {
+                drawMainScreenPartial();
+            }
             break;
         case SCREEN_CONTROL:
-            drawControlScreen();
+            if (needsFullRedraw) {
+                drawControlScreen();
+                needsFullRedraw = false;
+            } else {
+                drawControlScreenPartial();
+            }
             break;
         case SCREEN_MODE:
             // TODO: Draw mode selection screen
@@ -241,7 +271,7 @@ void display_refresh(void) {
             // TODO: Draw schedule screen
             break;
         case SCREEN_SETTINGS:
-            drawInfoScreen();
+            drawInfoScreen();  // Info screen doesn't change frequently, full redraw is fine
             break;
     }
 }
@@ -375,6 +405,137 @@ static void drawMainScreen(void) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Tap output to adjust", SCREEN_WIDTH / 2, SCREEN_HEIGHT - 10, 2);
+
+    // Store current values as previous for next partial update
+    for (int i = 0; i < 3; i++) {
+        prevCurrentTemp[i] = outputs[i].currentTemp;
+        prevTargetTemp[i] = outputs[i].targetTemp;
+        prevPower[i] = outputs[i].power;
+        prevHeating[i] = outputs[i].heating;
+        strncpy(prevMode[i], outputs[i].mode, sizeof(prevMode[i]) - 1);
+    }
+}
+
+/**
+ * Invalidate previous values to force full content redraw
+ */
+static void invalidatePreviousValues(void) {
+    for (int i = 0; i < 3; i++) {
+        prevCurrentTemp[i] = -999;
+        prevTargetTemp[i] = -999;
+        prevPower[i] = -1;
+        prevHeating[i] = false;
+        prevMode[i][0] = '\0';
+    }
+}
+
+/**
+ * Partial update for main screen - only redraw changed values
+ */
+static void drawMainScreenPartial(void) {
+    int yPos = 40;
+    const int cardHeight = 85;
+    const int cardSpacing = 5;
+
+    for (int i = 0; i < 3; i++) {
+        DisplayOutputData* output = &outputs[i];
+        uint16_t bgColor = output->heating ? 0x4208 : 0x2104;
+        char tempStr[16];
+
+        // Check if heating state changed (requires card background redraw)
+        bool heatingChanged = (output->heating != prevHeating[i]);
+        if (heatingChanged) {
+            // Redraw entire card background
+            tft.fillRoundRect(5, yPos, SCREEN_WIDTH - 10, cardHeight, 5, bgColor);
+
+            // Redraw static elements
+            tft.setTextColor(TFT_WHITE, bgColor);
+            tft.setTextDatum(TL_DATUM);
+            if (output->name[0] != '\0') {
+                tft.drawString(output->name, 10, yPos + 5, 2);
+            } else {
+                char name[32];
+                sprintf(name, "Output %d", i + 1);
+                tft.drawString(name, 10, yPos + 5, 2);
+            }
+            tft.drawString("C", 70, yPos + 28, 2);
+
+            // Force redraw all values
+            prevCurrentTemp[i] = -999;
+            prevTargetTemp[i] = -999;
+            prevPower[i] = -1;
+            prevMode[i][0] = '\0';
+        }
+
+        // Heating indicator
+        if (heatingChanged) {
+            // Clear area first
+            tft.fillRect(SCREEN_WIDTH - 55, yPos + 3, 50, 18, bgColor);
+            if (output->heating) {
+                tft.setTextColor(TFT_ORANGE, bgColor);
+                tft.setTextDatum(TR_DATUM);
+                tft.drawString("HEAT", SCREEN_WIDTH - 15, yPos + 5, 2);
+            }
+        }
+
+        // Current temperature (only if changed)
+        if (abs(output->currentTemp - prevCurrentTemp[i]) >= 0.05f) {
+            // Clear old value area
+            tft.fillRect(10, yPos + 25, 55, 22, bgColor);
+            tft.setTextColor(TFT_WHITE, bgColor);
+            tft.setTextDatum(TL_DATUM);
+            sprintf(tempStr, "%.1f", output->currentTemp);
+            tft.drawString(tempStr, 10, yPos + 25, 4);
+            prevCurrentTemp[i] = output->currentTemp;
+        }
+
+        // Target temperature (only if changed)
+        if (abs(output->targetTemp - prevTargetTemp[i]) >= 0.05f) {
+            // Clear old value area
+            tft.fillRect(SCREEN_WIDTH - 100, yPos + 28, 85, 16, bgColor);
+            tft.setTextColor(TFT_WHITE, bgColor);
+            tft.setTextDatum(TR_DATUM);
+            sprintf(tempStr, "-> %.1f C", output->targetTemp);
+            tft.drawString(tempStr, SCREEN_WIDTH - 15, yPos + 30, 2);
+            prevTargetTemp[i] = output->targetTemp;
+        }
+
+        // Mode (only if changed)
+        if (strcmp(output->mode, prevMode[i]) != 0) {
+            tft.fillRect(10, yPos + 48, 80, 18, bgColor);
+            tft.setTextDatum(TL_DATUM);
+            tft.setTextColor(TFT_CYAN, bgColor);
+            tft.drawString(output->mode, 10, yPos + 50, 2);
+            strncpy(prevMode[i], output->mode, sizeof(prevMode[i]) - 1);
+        }
+
+        // Power percentage (only if changed)
+        if (output->power != prevPower[i]) {
+            // Clear old value area
+            tft.fillRect(SCREEN_WIDTH - 55, yPos + 48, 40, 18, bgColor);
+            tft.setTextColor(TFT_CYAN, bgColor);
+            tft.setTextDatum(TR_DATUM);
+            sprintf(tempStr, "%d%%", output->power);
+            tft.drawString(tempStr, SCREEN_WIDTH - 15, yPos + 50, 2);
+
+            // Update power bar
+            int barX = 10;
+            int barY = yPos + 70;
+            int barWidth = SCREEN_WIDTH - 30;
+            int barHeight = 8;
+
+            tft.fillRoundRect(barX, barY, barWidth, barHeight, 3, TFT_DARKGREY);
+            if (output->power > 0) {
+                int fillWidth = (barWidth * output->power) / 100;
+                uint16_t barColor = getHeatColor(output->power);
+                tft.fillRoundRect(barX, barY, fillWidth, barHeight, 3, barColor);
+            }
+            prevPower[i] = output->power;
+        }
+
+        prevHeating[i] = output->heating;
+        yPos += cardHeight + cardSpacing;
+    }
 }
 
 /**
@@ -426,6 +587,51 @@ static void drawControlScreen(void) {
     tft.fillRoundRect(40, 270, SCREEN_WIDTH - 80, 40, 8, TFT_MAROON);
     tft.setTextColor(TFT_WHITE, TFT_MAROON);
     tft.drawString("BACK", SCREEN_WIDTH / 2, 290, 2);
+
+    // Store values for partial update comparison
+    prevCurrentTemp[selectedOutput] = output->currentTemp;
+    prevTargetTemp[selectedOutput] = output->targetTemp;
+    strncpy(prevMode[selectedOutput], output->mode, sizeof(prevMode[selectedOutput]) - 1);
+}
+
+/**
+ * Partial update for control screen - only redraw changed values
+ */
+static void drawControlScreenPartial(void) {
+    DisplayOutputData* output = &outputs[selectedOutput];
+    char tempStr[16];
+
+    // Current temperature (only if changed)
+    if (abs(output->currentTemp - prevCurrentTemp[selectedOutput]) >= 0.05f) {
+        // Clear old value area
+        tft.fillRect(40, 68, SCREEN_WIDTH - 80, 28, TFT_BLACK);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        sprintf(tempStr, "%.1f C", output->currentTemp);
+        tft.drawString(tempStr, SCREEN_WIDTH / 2, 80, 4);
+        prevCurrentTemp[selectedOutput] = output->currentTemp;
+    }
+
+    // Target temperature (only if changed)
+    if (abs(output->targetTemp - prevTargetTemp[selectedOutput]) >= 0.05f) {
+        // Clear old value area
+        tft.fillRect(70, 138, 100, 28, TFT_BLACK);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        sprintf(tempStr, "%.1f C", output->targetTemp);
+        tft.drawString(tempStr, SCREEN_WIDTH / 2, 150, 4);
+        prevTargetTemp[selectedOutput] = output->targetTemp;
+    }
+
+    // Mode (only if changed)
+    if (strcmp(output->mode, prevMode[selectedOutput]) != 0) {
+        // Redraw mode button
+        tft.fillRoundRect(40, 210, SCREEN_WIDTH - 80, 40, 8, TFT_BLUE);
+        tft.setTextColor(TFT_WHITE, TFT_BLUE);
+        tft.setTextDatum(MC_DATUM);
+        tft.drawString(output->mode, SCREEN_WIDTH / 2, 230, 2);
+        strncpy(prevMode[selectedOutput], output->mode, sizeof(prevMode[selectedOutput]) - 1);
+    }
 }
 
 /**
@@ -656,16 +862,17 @@ static void handleControlTouch(int x, int y) {
     // Mode button (40, 210, 160x40)
     if (x >= 40 && x <= (SCREEN_WIDTH - 40) && y >= 210 && y <= 250) {
         if (modeCallback) {
-            // Cycle through modes: off -> manual -> pid -> onoff -> schedule -> off
-            const char* modes[] = {"off", "manual", "pid", "onoff", "schedule"};
+            // Cycle through modes: off -> manual -> pid -> onoff -> timeprop -> schedule -> off
+            const char* modes[] = {"off", "manual", "pid", "onoff", "timeprop", "schedule"};
+            int numModes = 6;
             int currentModeIndex = 0;
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < numModes; i++) {
                 if (strcmp(output->mode, modes[i]) == 0) {
                     currentModeIndex = i;
                     break;
                 }
             }
-            int nextModeIndex = (currentModeIndex + 1) % 5;
+            int nextModeIndex = (currentModeIndex + 1) % numModes;
             modeCallback(selectedOutput, modes[nextModeIndex]);
 
             // Update local display data immediately
