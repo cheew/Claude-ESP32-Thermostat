@@ -1,8 +1,8 @@
 # ESP32 Thermostat - Future Features & Roadmap
 
-**Document Version:** 1.2
-**Last Updated:** January 16, 2026
-**Current Project Version:** v2.2.0 (dev)
+**Document Version:** 1.3
+**Last Updated:** January 24, 2026
+**Current Project Version:** v2.3.0
 
 ---
 
@@ -204,6 +204,99 @@ int y = map(p.x, 200, 3800, 0, SCREEN_HEIGHT);  // Raw X -> Screen Y
 - Schedule configuration
 
 Mode toggle via orange dropdown in navigation bar. Preference persists.
+
+---
+
+## ✅ Priority 2d: Safety System Implementation (COMPLETED v2.2.1)
+
+### Overview
+**Completed:** Comprehensive safety system to prevent system failures and hazardous conditions:
+- **Hardware Watchdog**: 30-second timeout with automatic reset
+- **Boot Loop Detection**: Safe mode activation after 3 rapid reboots
+- **Emergency Stop**: Single-button shutdown of all outputs
+- **Per-Output Safety**: Max/min temperature cutoffs, fault modes
+- **Sensor Fault Detection**: Automatic output shutdown on sensor failure
+
+### Implementation Details
+- Module: `src/utils/safety_manager.cpp`
+- Watchdog: ESP32 hardware timer with 30s timeout
+- Boot tracking: Stored in RTC memory and preferences
+- Safe mode: All outputs disabled, web interface shows warning
+- Safety Settings page: `/safety` route with emergency controls
+
+### Safety Features
+1. **Hardware Watchdog**
+   - Automatic system reset if firmware hangs
+   - 30-second timeout period
+   - Prevents stuck heater scenarios
+
+2. **Boot Loop Protection**
+   - Detects 3 or more reboots within 60 seconds
+   - Automatically enters safe mode
+   - Requires manual recovery via web interface
+
+3. **Emergency Stop**
+   - Web UI button to immediately disable all outputs
+   - Persists across reboots until manually cleared
+   - Visual indicator on all pages
+
+4. **Temperature Limits**
+   - Per-output maximum temperature cutoff
+   - Per-output minimum temperature cutoff
+   - Configurable fault response (disable output or safe power level)
+
+5. **Sensor Fault Handling**
+   - Automatic detection of disconnected/failed sensors
+   - Configurable response per output
+   - Error logging and status reporting
+
+See `SAFETY_FEATURES.md` for complete documentation.
+
+---
+
+## ✅ Priority 3a: Advanced Control & Display Enhancements (COMPLETED v2.3.0)
+
+### Overview
+**Completed:** Enhanced control algorithms and display performance:
+- **Time-Proportional Control Mode**: New control mode for outputs
+- **TFT Partial Updates**: Eliminated screen flashing with partial refresh
+- **Improved Display Performance**: Smoother UI updates and reduced flicker
+
+### Time-Proportional Control Mode
+A new control mode designed for slow-response heating elements (heat mats, ceramic heaters):
+- Operates in defined time windows (e.g., 60-second cycles)
+- Outputs proportional on-time based on PID calculation
+- Example: 50% power = 30s ON, 30s OFF
+- Reduces mechanical relay wear compared to rapid switching
+- Ideal for SSR-controlled heating elements
+- Configurable cycle duration per output
+
+**Benefits:**
+- Smoother temperature control than simple on/off
+- Less wear on switching hardware
+- Better suited for high thermal mass systems
+- More efficient than continuous PWM for some loads
+
+### TFT Partial Updates
+Major display performance improvement:
+- Eliminated full-screen redraws that caused flashing
+- Selective region updates for changed values only
+- Maintains smooth, flicker-free display
+- Reduced power consumption from display updates
+- Improved perceived responsiveness
+
+**Technical Implementation:**
+- Track dirty regions that need updating
+- Update only temperature values, status indicators, and power bars
+- Background and static elements persist
+- Minimal impact on update cycle time
+
+### Display Manager Enhancements
+Module: `src/hardware/display_manager.cpp` (704 lines)
+- Optimized refresh logic for partial updates
+- Improved touch responsiveness
+- Better visual feedback for user interactions
+- Reduced memory usage during updates
 
 ---
 
