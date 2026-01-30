@@ -1,18 +1,23 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 2.2.0 - Safety Features & Project Cleanup
- * Last Updated: January 16, 2026
+ * Version: 2.3.1 - Schedule & Dark Mode Fixes
+ * Last Updated: January 30, 2026
+ *
+ * v2.3.1 Changes:
+ * - Fixed schedule page dropdown issue (days field undefined error)
+ * - Comprehensive dark mode improvements (all pages readable)
+ * - Dark mode aware dynamic elements (output cards, schedule slots)
+ *
+ * v2.3.0 Changes:
+ * - Time-proportional control mode for equipment-friendly heating
+ * - TFT display partial updates (no more screen flashing)
+ * - Configurable cycle timing for relay wear reduction
  *
  * v2.2.0 Changes:
  * - Sensor fault detection (stale/error states per output)
  * - Hard temperature cutoffs (max/min limits override all modes)
  * - Health API endpoint for monitoring
  * - Project cleanup and documentation consolidation
- *
- * v2.1.0 Changes:
- * - MQTT multi-output support (3 Home Assistant climate entities)
- * - Schedule page with per-output scheduling
- * - Mobile responsive design (phones and tablets)
  */
 
 #include <Arduino.h>
@@ -41,7 +46,7 @@
 #include "safety_manager.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "2.2.0"
+#define FIRMWARE_VERSION "2.3.1"
 
 // Hardware configuration
 #define ONE_WIRE_BUS 4  // DS18B20 OneWire bus pin

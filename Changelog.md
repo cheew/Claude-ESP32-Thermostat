@@ -2,6 +2,29 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.3.1] - 2026-01-30
+
+### Fixed
+- **Schedule Page Bug**: Fixed JavaScript error preventing schedule from loading when selecting different outputs
+  - Issue: `days` field returned as `undefined` from API, causing `indexOf` error
+  - Solution: Ensured `days` field is always a valid string in both API response and JavaScript
+  - Schedule slots now properly display when changing output selection
+- **Dark Mode Readability**: Comprehensive dark mode improvements across all pages
+  - Added CSS overrides for inline styles (panels, cards, help text)
+  - Made output cards dark-mode aware (heating: dark red, not heating: dark green)
+  - Made schedule slots and day selectors dark-mode aware
+  - Fixed light backgrounds on: output selector box, config panels, info boxes
+  - All text now readable in dark mode (no more dark text on dark backgrounds)
+
+### Changed
+- JavaScript-generated elements (output cards, schedule slots) now detect and adapt to dark mode
+- Improved contrast ratios for better accessibility in dark mode
+
+### Files Modified
+- `src/network/web_server.cpp` - Dark mode CSS rules, JavaScript dark mode detection, schedule bug fix
+
+---
+
 ## [2.3.0] - 2026-01-17
 
 ### Added

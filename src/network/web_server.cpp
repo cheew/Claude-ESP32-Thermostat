@@ -894,6 +894,7 @@ static void handleRoot(void) {
         // ========== ADVANCED MODE (original) ==========
         // Multi-output auto-refresh script
         html += "<script>function updateOutputs(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
+        html += "let isDark=document.body.classList.contains('dark-mode');";
         html += "d.outputs.forEach((o,i)=>{let id=i+1;";
         html += "document.getElementById('temp'+id).innerText=o.temp+'°C';";
         html += "document.getElementById('target'+id).innerText=o.target+'°C';";
@@ -902,7 +903,7 @@ static void handleRoot(void) {
         html += "document.getElementById('power-val'+id).innerText=o.power+'%';";
         html += "document.getElementById('power-fill'+id).style.width=o.power+'%';";
         html += "let card=document.getElementById('output'+id);";
-        html += "card.style.background=o.heating?'#ffebee':'#e8f5e9';";
+        html += "card.style.background=isDark?(o.heating?'#3d1f1f':'#1e3d1f'):(o.heating?'#ffebee':'#e8f5e9');";
         html += "card.style.opacity=o.enabled?'1':'0.5';";
         html += "});});}updateOutputs();setInterval(updateOutputs,2000);</script>";
 
@@ -1575,13 +1576,18 @@ static void handleSchedule(void) {
 
     // Render schedule slots HTML
     html += "function renderSlots(){";
+    html += "let isDark=document.body.classList.contains('dark-mode');";
     html += "let html='';";
     html += "let dayNames=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];";
     html += "for(let i=0;i<8;i++){";
     html += "let slot=currentSchedule[i]||{enabled:false,hour:0,minute:0,targetTemp:28.0,days:''};";
+    html += "slot.days=slot.days||'';";  // Ensure days is always a string
     html += "let isActive=slot.enabled&&slot.days.length>0;";
-    html += "html+='<div class=\"schedule-slot\" style=\"border:2px solid '+(isActive?'#4CAF50':'#ddd')+';";
-    html += "padding:15px;border-radius:10px;margin:15px 0;background:'+(isActive?'#f1f8f4':'#f9f9f9')+'\">';";
+    html += "let activeBg=isDark?'#1e3d1f':'#f1f8f4';";
+    html += "let inactiveBg=isDark?'#2d2d2d':'#f9f9f9';";
+    html += "let borderColor=isDark?'#3d3d3d':'#ddd';";
+    html += "html+='<div class=\"schedule-slot\" style=\"border:2px solid '+(isActive?'#4CAF50':borderColor)+';";
+    html += "padding:15px;border-radius:10px;margin:15px 0;background:'+(isActive?activeBg:inactiveBg)+'\">';";
     html += "html+='<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:10px\">';";
     html += "html+='<strong>Slot '+(i+1)+'</strong>';";
     html += "html+='<label style=\"display:flex;align-items:center;gap:5px\">';";
@@ -1601,11 +1607,14 @@ static void handleSchedule(void) {
     html += "for(let d=0;d<7;d++){";
     html += "let dayChar='SMTWTFS'[d];";
     html += "let checked=slot.days.indexOf(dayChar)>=0;";
-    html += "html+='<label style=\"min-width:40px;flex:1;max-width:60px;text-align:center;padding:8px 4px;background:'+(checked?'#4CAF50':'#ddd')+';";
-    html += "color:'+(checked?'white':'#666')+';border-radius:5px;cursor:pointer;font-size:12px\">';";
+    html += "let selectedBg=isDark?'#2d5f2e':'#4CAF50';";
+    html += "let unselectedBg=isDark?'#3d3d3d':'#ddd';";
+    html += "let unselectedText=isDark?'#b0b0b0':'#666';";
+    html += "html+='<label style=\"min-width:40px;flex:1;max-width:60px;text-align:center;padding:8px 4px;background:'+(checked?selectedBg:unselectedBg)+';";
+    html += "color:'+(checked?'white':unselectedText)+';border-radius:5px;cursor:pointer;font-size:12px\">';";
     html += "html+='<input type=\"checkbox\" id=\"day'+i+'_'+d+'\" '+(checked?'checked':'')+' ';";
-    html += "html+='style=\"display:none\" onchange=\"this.parentElement.style.background=this.checked?\\'#4CAF50\\':\\'#ddd\\';";
-    html += "this.parentElement.style.color=this.checked?\\'white\\':\\'#666\\'\">';";
+    html += "html+='style=\"display:none\" onchange=\"let isDark=document.body.classList.contains(\\'dark-mode\\');this.parentElement.style.background=this.checked?(isDark?\\'#2d5f2e\\':\\'#4CAF50\\'):(isDark?\\'#3d3d3d\\':\\'#ddd\\');";
+    html += "this.parentElement.style.color=this.checked?\\'white\\':(isDark?\\'#b0b0b0\\':\\'#666\\')\">';";
     html += "html+=dayNames[d]+'</label>';}";
     html += "html+='</div></div>';";
     html += "html+='</div>';}";
@@ -2092,7 +2101,11 @@ static void handleOutputAPI(void) {
         slot["hour"] = output->schedule[i].hour;
         slot["minute"] = output->schedule[i].minute;
         slot["targetTemp"] = serialized(String(output->schedule[i].targetTemp, 1));
-        slot["days"] = output->schedule[i].days;
+        // Ensure days is always a valid string (null-terminated)
+        char daysBuf[8];
+        strncpy(daysBuf, output->schedule[i].days, 7);
+        daysBuf[7] = '\0';
+        slot["days"] = String(daysBuf);
     }
 
     String response;
@@ -2442,6 +2455,35 @@ static String buildCSS(void) {
     css += "body.dark-mode #next-schedule-info{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
     css += "body.dark-mode #pid-tuning{background:#2d2d2d;color:#f0f0f0}";
     css += "body.dark-mode #pid-tuning p{color:#d0d0d0}";
+
+    // Output cards (home page)
+    css += "body.dark-mode [id^='output']{background:#2d2d2d !important}";
+    css += "body.dark-mode [id^='output'] h3{color:#f0f0f0}";
+    css += "body.dark-mode [id^='output'] div{color:#d0d0d0}";
+    css += "body.dark-mode [id^='output'] strong{color:#f0f0f0}";
+
+    // Temperature display
+    css += "body.dark-mode .temp-display{color:#f0f0f0}";
+    css += "body.dark-mode .temp-display small{color:#b0b0b0}";
+
+    // Simple card styling
+    css += "body.dark-mode .simple-card h3{color:#f0f0f0}";
+    css += "body.dark-mode .target-row label,body.dark-mode .mode-row label,body.dark-mode .power-row label{color:#b0b0b0}";
+
+    // Panel backgrounds (override inline styles)
+    css += "body.dark-mode div[style*='background:#f9f9f9']{background:#2d2d2d !important}";
+    css += "body.dark-mode div[style*='background:#f0f0f0']{background:#2d2d2d !important}";
+    css += "body.dark-mode div[style*='background:#e3f2fd']{background:#1a2a3a !important;color:#d0f0ff !important}";
+    css += "body.dark-mode div[style*='background:#f1f8f4']{background:#1e3d1f !important}";
+    css += "body.dark-mode div[style*='background:#e8f5e9']{background:#1e3d1f !important}";
+    css += "body.dark-mode div[style*='background:#ffebee']{background:#3d1f1f !important}";
+
+    // Help text (override inline color:#666)
+    css += "body.dark-mode p[style*='color:#666'],body.dark-mode span[style*='color:#666']{color:#b0b0b0 !important}";
+
+    // Schedule slots
+    css += "body.dark-mode .schedule-slot,body.dark-mode #schedule-slots>div{background:#2d2d2d !important;border-color:#3d3d3d !important}";
+
     css += "*{transition:background-color 0.3s,color 0.3s,border-color 0.3s}";
 
     css += "</style>";
