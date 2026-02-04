@@ -2,6 +2,59 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.4.0] - 2026-02-04
+
+### Added
+- **Cloud MQTT Broker**: HiveMQ Cloud support with TLS encryption (port 8883)
+  - WiFiClientSecure with ISRG Root X1 CA certificate
+  - Cloud broker configuration in Settings page (host, port, user, password)
+  - Independent telemetry publishing to cloud namespace
+  - Remote setpoint and mode control via cloud topics
+  - Last Will and Testament (LWT) for online/offline status
+- **Login Brute Force Protection**: Progressive lockout on failed PIN attempts
+  - 3 failures: 30-second lockout
+  - 5 failures: 2-minute lockout
+  - 10 failures: 10-minute lockout
+  - Lockout status shown on login page and API (HTTP 429)
+- **Session Expiry**: 1-hour session TTL with automatic invalidation
+- **API Authentication**: Control endpoints (`/api/set`, `/api/control`) now require authentication
+- **Setup Wizard Spec**: `SETUP_WIZARD.md` - living document tracking all wizard features
+
+### Changed
+- Session tokens now generated using hardware RNG (`esp_random`) instead of `random()`
+- MQTT publishing refactored: local and cloud brokers share timing loop with independent connections
+
+### Fixed
+- **Dark Mode Flash (FOUC)**: Eliminated flash of light mode when navigating between pages
+  - Moved dark mode initialization from `body onload` to inline `<script>` in `<head>`
+  - Dark mode class applied to `<html>` element (renders before body)
+  - CSS selectors updated from `body.dark-mode` to `.dark-mode`
+  - Toggle function updated to use `document.documentElement`
+
+### Security
+- Hardware RNG for session tokens (cryptographically stronger)
+- Brute force protection prevents PIN enumeration
+- Session expiry limits window of stolen session reuse
+- API endpoints enforce authentication
+
+### Files Added
+- `SETUP_WIZARD.md` - Setup wizard feature checklist
+- `PINOUT_WIRING.md` - Hardware wiring documentation
+- `mqtt_security.md` - MQTT security notes
+
+### Files Modified
+- `include/config.h` - Version bump to 2.4.0
+- `include/mqtt_manager.h` - Cloud MQTT function declarations
+- `src/main.cpp` - Cloud MQTT init/task, shared publish timing
+- `src/network/mqtt_manager.cpp` - Cloud MQTT implementation (TLS, publish, subscribe, callbacks)
+- `src/network/web_server.cpp` - Brute force protection, session expiry, cloud MQTT settings UI, dark mode FOUC fix, API auth
+
+### Memory Usage
+- Flash: 94.4% (1,236,669 / 1,310,720 bytes) - ~74 KB remaining
+- RAM: 20.3% (66,572 / 327,680 bytes) - ~261 KB free
+
+---
+
 ## [2.3.1] - 2026-01-30
 
 ### Fixed

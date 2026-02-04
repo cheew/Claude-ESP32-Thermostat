@@ -4,6 +4,7 @@
  */
 
 #include "web_server.h"
+#include "mqtt_manager.h"
 #include "logger.h"
 #include "temp_history.h"
 #include "console.h"
@@ -54,6 +55,14 @@ static const char* GITHUB_FIRMWARE = "firmware.bin";
 static bool secureMode = false;
 static char securePin[8] = "";
 static char sessionToken[33] = "";
+
+// Brute force protection
+static int failedLoginAttempts = 0;
+static unsigned long lockoutUntil = 0;
+
+// Session expiry
+static unsigned long sessionCreatedAt = 0;
+static const unsigned long SESSION_TTL = 3600000; // 1 hour
 
 // UI Mode (false = simple, true = advanced)
 static bool advancedMode = false;
@@ -111,16 +120,50 @@ static String buildNavBar(const char* activePage);
 static void generateSessionToken(void);
 static bool isAuthenticated(void);
 static void requireAuth(void);
+static void requireAuthAPI(void);
+
+// Brute force lockout helpers
+static bool isLockedOut(void) {
+    if (lockoutUntil == 0) return false;
+    if (millis() >= lockoutUntil) {
+        lockoutUntil = 0;
+        return false;
+    }
+    return true;
+}
+
+static unsigned long getLockoutRemaining(void) {
+    if (lockoutUntil == 0 || millis() >= lockoutUntil) return 0;
+    return (lockoutUntil - millis()) / 1000;
+}
+
+static void recordFailedLogin(void) {
+    failedLoginAttempts++;
+    if (failedLoginAttempts >= 10) {
+        lockoutUntil = millis() + 600000;  // 10 min
+    } else if (failedLoginAttempts >= 5) {
+        lockoutUntil = millis() + 120000;  // 2 min
+    } else if (failedLoginAttempts >= 3) {
+        lockoutUntil = millis() + 30000;   // 30 sec
+    }
+    Serial.printf("[WebServer] Failed login #%d\n", failedLoginAttempts);
+}
+
+static void recordSuccessfulLogin(void) {
+    failedLoginAttempts = 0;
+    lockoutUntil = 0;
+}
 
 /**
- * Generate a random session token
+ * Generate a random session token using hardware RNG
  */
 static void generateSessionToken(void) {
     const char* hex = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
-        sessionToken[i] = hex[random(16)];
+        sessionToken[i] = hex[esp_random() & 0x0F];
     }
     sessionToken[32] = '\0';
+    sessionCreatedAt = millis();
 }
 
 /**
@@ -139,6 +182,11 @@ static bool isAuthenticated(void) {
         String cookie = server.header("Cookie");
         String expectedCookie = "session=" + String(sessionToken);
         if (cookie.indexOf(expectedCookie) >= 0 && strlen(sessionToken) > 0) {
+            // Check session expiry
+            if (sessionCreatedAt > 0 && (millis() - sessionCreatedAt) > SESSION_TTL) {
+                sessionToken[0] = '\0';  // Invalidate expired session
+                return false;
+            }
             return true;
         }
     }
@@ -146,12 +194,20 @@ static bool isAuthenticated(void) {
 }
 
 /**
- * Redirect to login page if not authenticated
+ * Redirect to login page if not authenticated (for HTML pages)
  */
 static void requireAuth(void) {
     String redirect = server.uri();
     server.sendHeader("Location", "/login?redirect=" + redirect);
     server.send(302);
+}
+
+/**
+ * Return 401 JSON for API endpoints that require authentication
+ */
+static void requireAuthAPI(void) {
+    server.send(401, "application/json",
+        "{\"success\":false,\"error\":\"Authentication required\"}");
 }
 
 /**
@@ -164,18 +220,27 @@ static void handleLogin(void) {
 
     // Handle POST (form submission)
     if (server.method() == HTTP_POST) {
-        String pin = server.arg("pin");
-        if (pin == String(securePin)) {
-            // Successful login - generate new session and set cookie
-            generateSessionToken();
-            server.sendHeader("Set-Cookie", "session=" + String(sessionToken) + "; Path=/; HttpOnly");
-            server.sendHeader("Location", redirect);
-            server.send(302);
-            Serial.println("[WebServer] Login successful");
-            return;
+        if (isLockedOut()) {
+            error = "Too many attempts. Try again in " + String(getLockoutRemaining()) + "s";
         } else {
-            error = "Invalid PIN";
-            Serial.println("[WebServer] Login failed - invalid PIN");
+            String pin = server.arg("pin");
+            if (pin == String(securePin)) {
+                // Successful login - generate new session and set cookie
+                recordSuccessfulLogin();
+                generateSessionToken();
+                server.sendHeader("Set-Cookie", "session=" + String(sessionToken) + "; Path=/; HttpOnly");
+                server.sendHeader("Location", redirect);
+                server.send(302);
+                Serial.println("[WebServer] Login successful");
+                return;
+            } else {
+                recordFailedLogin();
+                if (isLockedOut()) {
+                    error = "Too many attempts. Locked for " + String(getLockoutRemaining()) + "s";
+                } else {
+                    error = "Invalid PIN";
+                }
+            }
         }
     }
 
@@ -214,6 +279,14 @@ static void handleLogin(void) {
  * Handle API login (JSON POST)
  */
 static void handleLoginAPI(void) {
+    // Check brute force lockout
+    if (isLockedOut()) {
+        String resp = "{\"success\":false,\"error\":\"Too many attempts\",\"retry_after\":";
+        resp += String(getLockoutRemaining()) + "}";
+        server.send(429, "application/json", resp);
+        return;
+    }
+
     if (!server.hasArg("plain")) {
         server.send(400, "application/json", "{\"success\":false,\"error\":\"No data\"}");
         return;
@@ -228,11 +301,13 @@ static void handleLoginAPI(void) {
 
     const char* pin = doc["pin"];
     if (pin && strcmp(pin, securePin) == 0) {
+        recordSuccessfulLogin();
         generateSessionToken();
         server.sendHeader("Set-Cookie", "session=" + String(sessionToken) + "; Path=/; HttpOnly");
         server.send(200, "application/json", "{\"success\":true}");
         Serial.println("[WebServer] API login successful");
     } else {
+        recordFailedLogin();
         server.send(401, "application/json", "{\"success\":false,\"error\":\"Invalid PIN\"}");
         Serial.println("[WebServer] API login failed");
     }
@@ -1057,6 +1132,9 @@ static void handleHistory(void) {
  * Handle /api/set
  */
 static void handleSet(void) {
+    // Protected route - prevents unauthenticated thermostat control
+    if (!isAuthenticated()) { requireAuth(); return; }
+
     float newTarget = targetTemp;
     String newMode = String(currentMode);
     
@@ -1085,6 +1163,9 @@ static void handleSet(void) {
  * Handle /api/control - Unified control endpoint with JSON
  */
 static void handleControl(void) {
+    // Protected route - prevents unauthenticated thermostat control
+    if (!isAuthenticated()) { requireAuthAPI(); return; }
+
     // Parse JSON body
     if (!server.hasArg("plain")) {
         StaticJsonDocument<128> errorDoc;
@@ -1434,7 +1515,49 @@ static void handleSettings(void) {
     html += "<input type='text' name='mqtt_user' value='" + savedMQTTUser + "'></div>";
     html += "<div class='control'><label>MQTT Password:</label>";
     html += "<input type='password' name='mqtt_pass' placeholder='Enter new password or leave blank'></div>";
-    
+
+    // Cloud MQTT section
+    {
+        Preferences cloudPrefs;
+        cloudPrefs.begin("thermostat", true);
+        bool cloudEnabled = cloudPrefs.getBool("cloud_enabled", false);
+        String cloudBroker = cloudPrefs.getString("cloud_broker", "");
+        int cloudPort = cloudPrefs.getInt("cloud_port", 8883);
+        String cloudUser = cloudPrefs.getString("cloud_user", "");
+        cloudPrefs.end();
+
+        html += "<h2>Cloud MQTT (HiveMQ)</h2>";
+        html += "<div class='info-box'>Secure TLS connection on port 8883 for remote access via HiveMQ Cloud.</div>";
+
+        html += "<div class='control'><label><input type='checkbox' name='cloud_enabled' value='1'";
+        if (cloudEnabled) html += " checked";
+        html += "> Enable Cloud Broker</label></div>";
+
+        html += "<div class='control'><label>Cloud Broker Host:</label>";
+        html += "<input type='text' name='cloud_broker' value='" + cloudBroker + "' placeholder='xxxxx.s1.eu.hivemq.cloud'></div>";
+
+        html += "<div class='control'><label>Cloud Port:</label>";
+        html += "<input type='number' name='cloud_port' value='" + String(cloudPort) + "'></div>";
+
+        html += "<div class='control'><label>Cloud Username:</label>";
+        html += "<input type='text' name='cloud_user' value='" + cloudUser + "'></div>";
+
+        html += "<div class='control'><label>Cloud Password:</label>";
+        html += "<input type='password' name='cloud_pass' placeholder='Enter password or leave blank to keep current'></div>";
+
+        html += "<div class='control'><label>Status:</label><span>";
+        if (cloud_mqtt_is_enabled()) {
+            if (cloud_mqtt_is_connected()) {
+                html += "<span style='color:green'>Connected (TLS)</span>";
+            } else {
+                html += "<span style='color:orange'>Disconnected</span>";
+            }
+        } else {
+            html += "<span style='color:gray'>Disabled</span>";
+        }
+        html += "</span></div>";
+    }
+
     html += "<h2>PID Tuning</h2>";
     html += "<div class='control'><label>Kp (Proportional):</label>";
     html += "<input type='number' name='kp' value='" + String(kp, 2) + "' step='0.1' min='0'></div>";
@@ -1682,7 +1805,23 @@ static void handleSaveSettings(void) {
     if (server.hasArg("mqtt_pass") && server.arg("mqtt_pass").length() > 0) {
         prefs.putString("mqtt_pass", server.arg("mqtt_pass"));
     }
-    
+
+    // Save Cloud MQTT settings
+    bool newCloudEnabled = server.hasArg("cloud_enabled");
+    prefs.putBool("cloud_enabled", newCloudEnabled);
+    if (server.hasArg("cloud_broker")) {
+        prefs.putString("cloud_broker", server.arg("cloud_broker"));
+    }
+    if (server.hasArg("cloud_port")) {
+        prefs.putInt("cloud_port", server.arg("cloud_port").toInt());
+    }
+    if (server.hasArg("cloud_user")) {
+        prefs.putString("cloud_user", server.arg("cloud_user"));
+    }
+    if (server.hasArg("cloud_pass") && server.arg("cloud_pass").length() > 0) {
+        prefs.putString("cloud_pass", server.arg("cloud_pass"));
+    }
+
     // Save PID settings
     if (server.hasArg("kp")) {
         prefs.putFloat("Kp", server.arg("kp").toFloat());
@@ -1943,12 +2082,9 @@ String webserver_get_html_header(const char* title, const char* activePage) {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<title>" + String(title) + " - " + String(deviceName) + "</title>";
     html += buildCSS();
-    html += "</head><body";
-
-    // Auto-apply dark mode from localStorage or system preference
-    html += " onload=\"if(localStorage.getItem('darkMode')==='true'||((!localStorage.getItem('darkMode'))&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.body.classList.add('dark-mode');}\"";
-
-    html += "><div class='container'>";
+    // Apply dark mode BEFORE body renders to prevent flash (FOUC)
+    html += "<script>if(localStorage.getItem('darkMode')==='true'||((!localStorage.getItem('darkMode'))&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark-mode');}</script>";
+    html += "</head><body><div class='container'>";
     html += "<div class='header'>";
     html += "<h1>" + String(deviceName) + "</h1>";
     html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(firmwareVersion) + "</div>";
@@ -2427,62 +2563,62 @@ static String buildCSS(void) {
     css += ".mode-toggle{padding:10px 15px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:14px;font-weight:bold}";
 
     // Dark mode overrides - improved contrast
-    css += "body.dark-mode{background:#121212;color:#f0f0f0}";
-    css += "body.dark-mode .container{background:#1e1e1e;box-shadow:0 2px 10px rgba(0,0,0,0.8)}";
-    css += "body.dark-mode .header{background:linear-gradient(135deg,#2d5f2e,#1e3d1f)}";
-    css += "body.dark-mode h2{color:#f0f0f0;border-bottom-color:#4d4d4d}";
-    css += "body.dark-mode h3{color:#f0f0f0}";
-    css += "body.dark-mode p{color:#d0d0d0}";
-    css += "body.dark-mode label{color:#f0f0f0}";
-    css += "body.dark-mode input,body.dark-mode select,body.dark-mode textarea{background:#2d2d2d;color:#f0f0f0;border:1px solid #4d4d4d}";
-    css += "body.dark-mode input::placeholder{color:#808080}";
-    css += "body.dark-mode button{background:#2d5f2e;color:#f0f0f0}";
-    css += "body.dark-mode button:hover{background:#3d7f3e}";
-    css += "body.dark-mode .btn-secondary{background:#1e4d7a}";
-    css += "body.dark-mode .btn-secondary:hover{background:#163c5f}";
-    css += "body.dark-mode .stat-card{background:#2d2d2d;border:1px solid #3d3d3d}";
-    css += "body.dark-mode .stat-value{color:#4CAF50}";
-    css += "body.dark-mode .stat-label{color:#d0d0d0}";
-    css += "body.dark-mode .log-entry{border-bottom-color:#3d3d3d;color:#d0d0d0}";
-    css += "body.dark-mode .footer{border-top-color:#3d3d3d;color:#d0d0d0}";
-    css += "body.dark-mode .info-box{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
-    css += "body.dark-mode .warning-box{background:#3a3020;color:#ffe0a0;border-left-color:#ffc107}";
-    css += "body.dark-mode .nav a{background:#1e4d7a;color:#f0f0f0}";
-    css += "body.dark-mode .nav a:hover{background:#2d6fa0}";
-    css += "body.dark-mode .nav a.active{background:#2d5f2e}";
-    css += "body.dark-mode .theme-toggle{background:#1e4d7a}";
-    css += "body.dark-mode .theme-toggle:hover{background:#2d6fa0}";
-    css += "body.dark-mode #next-schedule-info{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
-    css += "body.dark-mode #pid-tuning{background:#2d2d2d;color:#f0f0f0}";
-    css += "body.dark-mode #pid-tuning p{color:#d0d0d0}";
+    css += ".dark-mode,.dark-mode body{background:#121212;color:#f0f0f0}";
+    css += ".dark-mode .container{background:#1e1e1e;box-shadow:0 2px 10px rgba(0,0,0,0.8)}";
+    css += ".dark-mode .header{background:linear-gradient(135deg,#2d5f2e,#1e3d1f)}";
+    css += ".dark-mode h2{color:#f0f0f0;border-bottom-color:#4d4d4d}";
+    css += ".dark-mode h3{color:#f0f0f0}";
+    css += ".dark-mode p{color:#d0d0d0}";
+    css += ".dark-mode label{color:#f0f0f0}";
+    css += ".dark-mode input,.dark-mode select,.dark-mode textarea{background:#2d2d2d;color:#f0f0f0;border:1px solid #4d4d4d}";
+    css += ".dark-mode input::placeholder{color:#808080}";
+    css += ".dark-mode button{background:#2d5f2e;color:#f0f0f0}";
+    css += ".dark-mode button:hover{background:#3d7f3e}";
+    css += ".dark-mode .btn-secondary{background:#1e4d7a}";
+    css += ".dark-mode .btn-secondary:hover{background:#163c5f}";
+    css += ".dark-mode .stat-card{background:#2d2d2d;border:1px solid #3d3d3d}";
+    css += ".dark-mode .stat-value{color:#4CAF50}";
+    css += ".dark-mode .stat-label{color:#d0d0d0}";
+    css += ".dark-mode .log-entry{border-bottom-color:#3d3d3d;color:#d0d0d0}";
+    css += ".dark-mode .footer{border-top-color:#3d3d3d;color:#d0d0d0}";
+    css += ".dark-mode .info-box{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
+    css += ".dark-mode .warning-box{background:#3a3020;color:#ffe0a0;border-left-color:#ffc107}";
+    css += ".dark-mode .nav a{background:#1e4d7a;color:#f0f0f0}";
+    css += ".dark-mode .nav a:hover{background:#2d6fa0}";
+    css += ".dark-mode .nav a.active{background:#2d5f2e}";
+    css += ".dark-mode .theme-toggle{background:#1e4d7a}";
+    css += ".dark-mode .theme-toggle:hover{background:#2d6fa0}";
+    css += ".dark-mode #next-schedule-info{background:#1a2a3a;color:#d0f0ff;border-left-color:#2196F3}";
+    css += ".dark-mode #pid-tuning{background:#2d2d2d;color:#f0f0f0}";
+    css += ".dark-mode #pid-tuning p{color:#d0d0d0}";
 
     // Output cards (home page)
-    css += "body.dark-mode [id^='output']{background:#2d2d2d !important}";
-    css += "body.dark-mode [id^='output'] h3{color:#f0f0f0}";
-    css += "body.dark-mode [id^='output'] div{color:#d0d0d0}";
-    css += "body.dark-mode [id^='output'] strong{color:#f0f0f0}";
+    css += ".dark-mode [id^='output']{background:#2d2d2d !important}";
+    css += ".dark-mode [id^='output'] h3{color:#f0f0f0}";
+    css += ".dark-mode [id^='output'] div{color:#d0d0d0}";
+    css += ".dark-mode [id^='output'] strong{color:#f0f0f0}";
 
     // Temperature display
-    css += "body.dark-mode .temp-display{color:#f0f0f0}";
-    css += "body.dark-mode .temp-display small{color:#b0b0b0}";
+    css += ".dark-mode .temp-display{color:#f0f0f0}";
+    css += ".dark-mode .temp-display small{color:#b0b0b0}";
 
     // Simple card styling
-    css += "body.dark-mode .simple-card h3{color:#f0f0f0}";
-    css += "body.dark-mode .target-row label,body.dark-mode .mode-row label,body.dark-mode .power-row label{color:#b0b0b0}";
+    css += ".dark-mode .simple-card h3{color:#f0f0f0}";
+    css += ".dark-mode .target-row label,.dark-mode .mode-row label,.dark-mode .power-row label{color:#b0b0b0}";
 
     // Panel backgrounds (override inline styles)
-    css += "body.dark-mode div[style*='background:#f9f9f9']{background:#2d2d2d !important}";
-    css += "body.dark-mode div[style*='background:#f0f0f0']{background:#2d2d2d !important}";
-    css += "body.dark-mode div[style*='background:#e3f2fd']{background:#1a2a3a !important;color:#d0f0ff !important}";
-    css += "body.dark-mode div[style*='background:#f1f8f4']{background:#1e3d1f !important}";
-    css += "body.dark-mode div[style*='background:#e8f5e9']{background:#1e3d1f !important}";
-    css += "body.dark-mode div[style*='background:#ffebee']{background:#3d1f1f !important}";
+    css += ".dark-mode div[style*='background:#f9f9f9']{background:#2d2d2d !important}";
+    css += ".dark-mode div[style*='background:#f0f0f0']{background:#2d2d2d !important}";
+    css += ".dark-mode div[style*='background:#e3f2fd']{background:#1a2a3a !important;color:#d0f0ff !important}";
+    css += ".dark-mode div[style*='background:#f1f8f4']{background:#1e3d1f !important}";
+    css += ".dark-mode div[style*='background:#e8f5e9']{background:#1e3d1f !important}";
+    css += ".dark-mode div[style*='background:#ffebee']{background:#3d1f1f !important}";
 
     // Help text (override inline color:#666)
-    css += "body.dark-mode p[style*='color:#666'],body.dark-mode span[style*='color:#666']{color:#b0b0b0 !important}";
+    css += ".dark-mode p[style*='color:#666'],.dark-mode span[style*='color:#666']{color:#b0b0b0 !important}";
 
     // Schedule slots
-    css += "body.dark-mode .schedule-slot,body.dark-mode #schedule-slots>div{background:#2d2d2d !important;border-color:#3d3d3d !important}";
+    css += ".dark-mode .schedule-slot,.dark-mode #schedule-slots>div{background:#2d2d2d !important;border-color:#3d3d3d !important}";
 
     css += "*{transition:background-color 0.3s,color 0.3s,border-color 0.3s}";
 
@@ -2526,7 +2662,7 @@ static String buildNavBar(const char* activePage) {
 
     // JavaScript for dark mode and UI mode switching
     nav += "<script>";
-    nav += "function toggleDarkMode(){document.body.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.body.classList.contains('dark-mode'));}";
+    nav += "function toggleDarkMode(){document.documentElement.classList.toggle('dark-mode');localStorage.setItem('darkMode',document.documentElement.classList.contains('dark-mode'));}";
     nav += "function switchUIMode(mode){fetch('/api/ui-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})}).then(()=>location.reload());}";
     nav += "</script>";
 

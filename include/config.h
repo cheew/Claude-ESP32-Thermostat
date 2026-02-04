@@ -4,7 +4,7 @@
 // ============================================
 // FIRMWARE INFORMATION
 // ============================================
-#define FIRMWARE_VERSION "2.3.1"
+#define FIRMWARE_VERSION "2.4.0"
 #define DEVICE_MODEL "ESP32 Reptile Thermostat"
 #define MANUFACTURER "DIY"
 

@@ -8,6 +8,7 @@
 #include "output_manager.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
 
 // Default MQTT configuration
 static const char* DEFAULT_MQTT_SERVER = "192.168.1.123";
@@ -590,4 +591,346 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
             modeCallback(topic, message);
         }
     }
+}
+
+// ============================================
+// CLOUD MQTT BROKER (HiveMQ Cloud / TLS)
+// ============================================
+
+// ISRG Root X1 - Let's Encrypt root CA (used by HiveMQ Cloud)
+// Valid until June 4, 2035
+static const char CLOUD_CA_CERT[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+)EOF";
+
+// Cloud MQTT configuration constants
+static const int CLOUD_DEFAULT_PORT = 8883;
+static const char* CLOUD_CLIENT_ID = "esp32_thermostat_cloud";
+static const unsigned long CLOUD_RECONNECT_INTERVAL = 10000; // 10 seconds
+static const int CLOUD_BUFFER_SIZE = 512;
+
+// Cloud MQTT state variables
+static WiFiClientSecure cloudWifiClient;
+static PubSubClient cloudMqttClient(cloudWifiClient);
+static MQTTState_t cloudCurrentState = MQTT_STATE_DISCONNECTED;
+static unsigned long cloudLastConnectionAttempt = 0;
+static bool cloudEnabled = false;
+static bool cloudInitialized = false;
+
+// Cloud topic base - different namespace from local
+static char cloudBaseTopic[64] = "thermostat/reptile_thermostat_01";
+
+// Forward declaration
+static bool cloud_mqtt_connect(void);
+static void cloudMqttCallback(char* topic, byte* payload, unsigned int length);
+
+/**
+ * Initialize cloud MQTT connection
+ */
+void cloud_mqtt_init(void) {
+    Serial.println("[CLOUD-MQTT] Initializing cloud MQTT");
+
+    // Load cloud config from preferences
+    Preferences prefs;
+    prefs.begin("thermostat", true);
+    cloudEnabled = prefs.getBool("cloud_enabled", false);
+    String server = prefs.getString("cloud_broker", "");
+    int port = prefs.getInt("cloud_port", CLOUD_DEFAULT_PORT);
+    prefs.end();
+
+    if (!cloudEnabled || server.length() == 0) {
+        Serial.println("[CLOUD-MQTT] Cloud MQTT disabled or not configured");
+        return;
+    }
+
+    // Configure TLS with CA certificate
+    cloudWifiClient.setCACert(CLOUD_CA_CERT);
+
+    // Setup cloud MQTT client
+    cloudMqttClient.setServer(server.c_str(), port);
+    cloudMqttClient.setCallback(cloudMqttCallback);
+    cloudMqttClient.setBufferSize(CLOUD_BUFFER_SIZE);
+    cloudInitialized = true;
+
+    Serial.print("[CLOUD-MQTT] Configured for: ");
+    Serial.print(server);
+    Serial.print(":");
+    Serial.println(port);
+}
+
+/**
+ * Cloud MQTT task - handles reconnection and message loop
+ */
+void cloud_mqtt_task(void) {
+    if (!cloudEnabled || !cloudInitialized) return;
+
+    if (cloudMqttClient.connected()) {
+        cloudMqttClient.loop();
+        if (cloudCurrentState != MQTT_STATE_CONNECTED) {
+            cloudCurrentState = MQTT_STATE_CONNECTED;
+        }
+    } else {
+        if (cloudCurrentState != MQTT_STATE_DISCONNECTED) {
+            Serial.println("[CLOUD-MQTT] Connection lost");
+            cloudCurrentState = MQTT_STATE_DISCONNECTED;
+        }
+
+        // Attempt reconnection at interval (10s for cloud)
+        if (millis() - cloudLastConnectionAttempt >= CLOUD_RECONNECT_INTERVAL) {
+            cloud_mqtt_connect();
+        }
+    }
+}
+
+/**
+ * Connect to cloud MQTT broker with TLS
+ */
+static bool cloud_mqtt_connect(void) {
+    cloudLastConnectionAttempt = millis();
+
+    if (cloudMqttClient.connected()) return true;
+
+    Serial.print("[CLOUD-MQTT] Attempting TLS connection...");
+    cloudCurrentState = MQTT_STATE_CONNECTING;
+
+    // Load credentials
+    Preferences prefs;
+    prefs.begin("thermostat", true);
+    String server = prefs.getString("cloud_broker", "");
+    String user = prefs.getString("cloud_user", "");
+    String password = prefs.getString("cloud_pass", "");
+    int port = prefs.getInt("cloud_port", CLOUD_DEFAULT_PORT);
+    prefs.end();
+
+    if (server.length() == 0) {
+        Serial.println(" no server configured");
+        cloudCurrentState = MQTT_STATE_DISCONNECTED;
+        return false;
+    }
+
+    // Update server in case it changed
+    cloudMqttClient.setServer(server.c_str(), port);
+
+    // Build LWT topic
+    char lwtTopic[80];
+    snprintf(lwtTopic, sizeof(lwtTopic), "%s/status/online", cloudBaseTopic);
+
+    // Connect with LWT (Last Will and Testament)
+    if (cloudMqttClient.connect(
+            CLOUD_CLIENT_ID,
+            user.c_str(), password.c_str(),
+            lwtTopic, 1, true, "false")) {
+
+        Serial.println(" connected (TLS)");
+        cloudCurrentState = MQTT_STATE_CONNECTED;
+
+        // Publish online status
+        cloudMqttClient.publish(lwtTopic, "true", true);
+
+        // Subscribe to command topics for all 3 outputs
+        for (int i = 1; i <= 3; i++) {
+            char setTempTopicBuf[80];
+            char modeSetTopicBuf[80];
+            snprintf(setTempTopicBuf, sizeof(setTempTopicBuf),
+                     "%s/output%d/setpoint/set", cloudBaseTopic, i);
+            snprintf(modeSetTopicBuf, sizeof(modeSetTopicBuf),
+                     "%s/output%d/mode/set", cloudBaseTopic, i);
+            cloudMqttClient.subscribe(setTempTopicBuf);
+            cloudMqttClient.subscribe(modeSetTopicBuf);
+        }
+
+        Serial.println("[CLOUD-MQTT] Subscribed to command topics (3 outputs)");
+        console_add_event(CONSOLE_EVENT_MQTT, "Cloud MQTT connected (TLS)");
+        return true;
+    } else {
+        Serial.print(" failed, rc=");
+        Serial.println(cloudMqttClient.state());
+        cloudCurrentState = MQTT_STATE_DISCONNECTED;
+        return false;
+    }
+}
+
+/**
+ * Cloud MQTT message callback
+ * Routes commands through same output_manager as local broker
+ */
+static void cloudMqttCallback(char* topic, byte* payload, unsigned int length) {
+    char message[256];
+    if (length >= sizeof(message)) length = sizeof(message) - 1;
+    memcpy(message, payload, length);
+    message[length] = '\0';
+
+    Serial.print("[CLOUD-MQTT] Message on ");
+    Serial.print(topic);
+    Serial.print(": ");
+    Serial.println(message);
+
+    // Check for output command topics
+    for (int i = 1; i <= 3; i++) {
+        char setTempTopicBuf[80];
+        char modeSetTopicBuf[80];
+        snprintf(setTempTopicBuf, sizeof(setTempTopicBuf),
+                 "%s/output%d/setpoint/set", cloudBaseTopic, i);
+        snprintf(modeSetTopicBuf, sizeof(modeSetTopicBuf),
+                 "%s/output%d/mode/set", cloudBaseTopic, i);
+
+        if (strcmp(topic, setTempTopicBuf) == 0) {
+            float target = atof(message);
+            if (target >= 15.0 && target <= 45.0) {
+                output_manager_set_target(i - 1, target);
+                output_manager_save_config();
+                console_add_event_f(CONSOLE_EVENT_MQTT,
+                    "CLOUD SET: Output %d target = %.1f", i, target);
+            } else {
+                Serial.printf("[CLOUD-MQTT] Rejected setpoint %.1f (out of range 15-45)\n", target);
+            }
+            return;
+        } else if (strcmp(topic, modeSetTopicBuf) == 0) {
+            ControlMode_t mode = CONTROL_MODE_OFF;
+            if (strcmp(message, "heat") == 0 || strcmp(message, "on") == 0) {
+                mode = CONTROL_MODE_PID;
+            } else if (strcmp(message, "off") == 0) {
+                mode = CONTROL_MODE_OFF;
+            }
+            output_manager_set_mode(i - 1, mode);
+            output_manager_save_config();
+            console_add_event_f(CONSOLE_EVENT_MQTT,
+                "CLOUD SET: Output %d mode = %s", i, message);
+            return;
+        }
+    }
+}
+
+/**
+ * Publish all outputs to cloud broker
+ */
+void cloud_mqtt_publish_all_outputs(int wifiRssi, uint32_t freeHeap,
+                                     unsigned long uptimeSeconds) {
+    if (!cloudEnabled || !cloudMqttClient.connected()) return;
+
+    for (int i = 0; i < 3; i++) {
+        OutputConfig_t* output = output_manager_get_output(i);
+        if (!output) continue;
+
+        int outputNum = i + 1;
+        char topicBuf[80];
+
+        // Temperature
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/temperature",
+                 cloudBaseTopic, outputNum);
+        char tempStr[8];
+        snprintf(tempStr, sizeof(tempStr), "%.1f", output->currentTemp);
+        cloudMqttClient.publish(topicBuf, tempStr, true);
+
+        // Setpoint
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/setpoint",
+                 cloudBaseTopic, outputNum);
+        char setpointStr[8];
+        snprintf(setpointStr, sizeof(setpointStr), "%.1f", output->targetTemp);
+        cloudMqttClient.publish(topicBuf, setpointStr, true);
+
+        // State (heating/idle)
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/state",
+                 cloudBaseTopic, outputNum);
+        cloudMqttClient.publish(topicBuf,
+            output->heating ? "heating" : "idle", true);
+
+        // Mode
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/mode",
+                 cloudBaseTopic, outputNum);
+        const char* haMode = "off";
+        if (output->controlMode != CONTROL_MODE_OFF && output->enabled) {
+            haMode = "heat";
+        }
+        cloudMqttClient.publish(topicBuf, haMode, true);
+
+        // Power
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/power",
+                 cloudBaseTopic, outputNum);
+        char powerStr[8];
+        snprintf(powerStr, sizeof(powerStr), "%d", output->currentPower);
+        cloudMqttClient.publish(topicBuf, powerStr, true);
+
+        // Status JSON
+        snprintf(topicBuf, sizeof(topicBuf), "%s/output%d/status",
+                 cloudBaseTopic, outputNum);
+        StaticJsonDocument<384> doc;
+        doc["temperature"] = round(output->currentTemp * 10) / 10.0;
+        doc["setpoint"] = output->targetTemp;
+        doc["heating"] = output->heating;
+        doc["mode"] = output_manager_get_mode_name(output->controlMode);
+        doc["power"] = output->currentPower;
+        doc["enabled"] = output->enabled;
+        doc["name"] = output->name;
+
+        if (i == 0) {
+            doc["wifi_rssi"] = wifiRssi;
+            doc["free_heap"] = freeHeap;
+            doc["uptime"] = uptimeSeconds;
+        }
+
+        char jsonBuf[384];
+        serializeJson(doc, jsonBuf);
+        cloudMqttClient.publish(topicBuf, jsonBuf, true);
+    }
+}
+
+/**
+ * Check if cloud MQTT is connected
+ */
+bool cloud_mqtt_is_connected(void) {
+    return cloudEnabled && cloudMqttClient.connected();
+}
+
+/**
+ * Check if cloud MQTT is enabled
+ */
+bool cloud_mqtt_is_enabled(void) {
+    return cloudEnabled;
+}
+
+/**
+ * Save cloud MQTT configuration
+ */
+void cloud_mqtt_save_config(bool enabled, const char* server, int port,
+                             const char* user, const char* password) {
+    Serial.println("[CLOUD-MQTT] Saving configuration");
+    Preferences prefs;
+    prefs.begin("thermostat", false);
+    prefs.putBool("cloud_enabled", enabled);
+    prefs.putString("cloud_broker", server);
+    prefs.putInt("cloud_port", port);
+    prefs.putString("cloud_user", user);
+    prefs.putString("cloud_pass", password);
+    prefs.end();
 }

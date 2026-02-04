@@ -164,4 +164,52 @@ void mqtt_save_config(const char* server, int port,
  */
 const char* mqtt_get_base_topic(void);
 
+// ============================================
+// Cloud MQTT Broker Functions (HiveMQ Cloud)
+// ============================================
+
+/**
+ * Initialize cloud MQTT connection
+ * Sets up WiFiClientSecure with TLS and CA certificate
+ */
+void cloud_mqtt_init(void);
+
+/**
+ * Cloud MQTT task - call from main loop
+ * Handles reconnection and message processing for cloud broker
+ */
+void cloud_mqtt_task(void);
+
+/**
+ * Check if cloud MQTT is connected
+ * @return true if connected to cloud broker
+ */
+bool cloud_mqtt_is_connected(void);
+
+/**
+ * Check if cloud MQTT is enabled in config
+ * @return true if cloud broker is enabled
+ */
+bool cloud_mqtt_is_enabled(void);
+
+/**
+ * Publish all outputs to cloud broker
+ * Same telemetry as local but on cloud topic namespace
+ * @param wifiRssi WiFi signal strength (dBm)
+ * @param freeHeap Free heap memory (bytes)
+ * @param uptimeSeconds System uptime (seconds)
+ */
+void cloud_mqtt_publish_all_outputs(int wifiRssi, uint32_t freeHeap, unsigned long uptimeSeconds);
+
+/**
+ * Save cloud MQTT configuration to preferences
+ * @param enabled Enable/disable cloud broker
+ * @param server Broker hostname
+ * @param port Broker port (8883)
+ * @param user Username
+ * @param password Password
+ */
+void cloud_mqtt_save_config(bool enabled, const char* server, int port,
+                             const char* user, const char* password);
+
 #endif // MQTT_MANAGER_H

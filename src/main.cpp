@@ -1,7 +1,15 @@
 /*
  * ESP32 Reptile Thermostat with PID Control
- * Version: 2.3.1 - Schedule & Dark Mode Fixes
- * Last Updated: January 30, 2026
+ * Version: 2.4.0 - Cloud MQTT, Security Hardening, Dark Mode Flash Fix
+ * Last Updated: February 4, 2026
+ *
+ * v2.4.0 Changes:
+ * - Cloud MQTT broker support (HiveMQ Cloud / TLS on port 8883)
+ * - Login brute force protection (progressive lockout)
+ * - Session expiry (1 hour TTL)
+ * - Hardware RNG for session tokens (esp_random)
+ * - API endpoint authentication enforcement
+ * - Dark mode flash fix (FOUC eliminated)
  *
  * v2.3.1 Changes:
  * - Fixed schedule page dropdown issue (days field undefined error)
@@ -46,7 +54,7 @@
 #include "safety_manager.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "2.3.1"
+#define FIRMWARE_VERSION "2.4.0"
 
 // Hardware configuration
 #define ONE_WIRE_BUS 4  // DS18B20 OneWire bus pin
@@ -170,11 +178,15 @@ void setup() {
         configTime(0, 0, "pool.ntp.org", "time.nist.gov");
         logger_add("Time sync started");
         
-        // Initialize MQTT
+        // Initialize MQTT (local broker)
         mqtt_init();
         mqtt_set_setpoint_callback(onMQTTSetpoint);
         mqtt_set_mode_callback(onMQTTMode);
         logger_add("MQTT initialized");
+
+        // Initialize Cloud MQTT (HiveMQ Cloud / TLS)
+        cloud_mqtt_init();
+        logger_add("Cloud MQTT initialized");
     }
     
     // Initialize web server
@@ -240,6 +252,7 @@ void loop() {
 
     if (!wifi_is_ap_mode()) {
         mqtt_task();
+        cloud_mqtt_task();
     }
 
     webserver_task();
@@ -303,12 +316,15 @@ void loop() {
     webserver_set_network_status(!wifi_is_ap_mode(), wifi_is_ap_mode(),
                                  wifi_get_ssid(), wifi_get_ip_address());
     
-    // Publish MQTT status (every 30s) - Multi-output
-    if (!wifi_is_ap_mode() && mqtt_is_connected()) {
-        if (millis() - lastMqttPublish >= 30000) {
-            // Publish all 3 outputs status
-            mqtt_publish_all_outputs(WiFi.RSSI(), ESP.getFreeHeap(), millis() / 1000);
-            lastMqttPublish = millis();
+    // Publish MQTT status (every 30s) - Local + Cloud brokers
+    if (!wifi_is_ap_mode() && (millis() - lastMqttPublish >= 30000)) {
+        int rssi = WiFi.RSSI();
+        uint32_t heap = ESP.getFreeHeap();
+        unsigned long uptime = millis() / 1000;
+
+        // Publish to local broker
+        if (mqtt_is_connected()) {
+            mqtt_publish_all_outputs(rssi, heap, uptime);
 
             // Send HA discovery once
             static bool discoveryDone = false;
@@ -325,6 +341,13 @@ void loop() {
                 discoveryDone = true;
             }
         }
+
+        // Publish to cloud broker
+        if (cloud_mqtt_is_connected()) {
+            cloud_mqtt_publish_all_outputs(rssi, heap, uptime);
+        }
+
+        lastMqttPublish = millis();
     }
 }
 
