@@ -354,7 +354,7 @@ void loop() {
                     strncpy(devName, savedName.c_str(), sizeof(devName) - 1);
                 }
                 prefs.end();
-                mqtt_send_ha_discovery(devName, "reptile_thermostat_01");
+                mqtt_send_ha_discovery(devName, mqtt_get_device_id());
                 discoveryDone = true;
             }
         }

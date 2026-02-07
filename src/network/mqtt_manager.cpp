@@ -15,7 +15,7 @@ static const char* DEFAULT_MQTT_SERVER = "192.168.1.123";
 static const int DEFAULT_MQTT_PORT = 1883;
 static const char* DEFAULT_MQTT_USER = "admin";
 static const char* DEFAULT_MQTT_PASSWORD = "Oasis0asis!!";
-static const char* MQTT_CLIENT_ID = "esp32_thermostat";
+static const char* MQTT_CLIENT_ID_PREFIX = "esp32_thermostat";
 
 // Home Assistant discovery
 static const char* HA_DISCOVERY_PREFIX = "homeassistant";
@@ -28,7 +28,7 @@ static unsigned long lastConnectionAttempt = 0;
 static const unsigned long CONNECTION_RETRY_INTERVAL = 5000; // 5 seconds
 
 // Topic storage
-static char baseTopic[64] = "reptile/thermostat_01";
+static char baseTopic[64] = "";
 static char tempTopic[80];
 static char stateTopic[80];
 static char modeTopic[80];
@@ -38,15 +38,27 @@ static char statusTopic[80];
 
 // Device info for HA discovery
 static char deviceName[32] = "Reptile Thermostat";
-static char deviceId[32] = "reptile_thermostat_01";
+static char deviceId[32] = "";
+static char mqttClientId[48] = "";
 
 // Message callbacks
 static MQTTMessageCallback_t setpointCallback = NULL;
 static MQTTMessageCallback_t modeCallback = NULL;
 
+// Cloud MQTT configuration constants
+static const int CLOUD_DEFAULT_PORT = 8883;
+static const char* CLOUD_CLIENT_ID_PREFIX = "esp32_thermostat_cloud";
+static const unsigned long CLOUD_RECONNECT_INTERVAL = 10000; // 10 seconds
+static const int CLOUD_BUFFER_SIZE = 512;
+
+// Cloud topic base - different namespace from local
+static char cloudBaseTopic[64] = "";
+static char cloudClientId[64] = "";
+
 // Forward declarations
 static void buildTopics(void);
 static void mqttCallback(char* topic, byte* payload, unsigned int length);
+static void buildDeviceIds(void);
 
 /**
  * Initialize MQTT manager
@@ -61,6 +73,9 @@ void mqtt_init(void) {
     int port = (int)prefs.getFloat("mqtt_port", DEFAULT_MQTT_PORT);
     prefs.end();
     
+    // Build unique IDs (client ID, device ID, base topic)
+    buildDeviceIds();
+
     // Setup MQTT client
     mqttClient.setServer(server.c_str(), port);
     mqttClient.setCallback(mqttCallback);
@@ -125,7 +140,7 @@ bool mqtt_connect(void) {
     mqttClient.setServer(server.c_str(), port);
     
     // Attempt connection
-    if (mqttClient.connect(MQTT_CLIENT_ID, user.c_str(), password.c_str())) {
+    if (mqttClient.connect(mqttClientId, user.c_str(), password.c_str())) {
         Serial.println(" connected");
         currentState = MQTT_STATE_CONNECTED;
 
@@ -522,6 +537,30 @@ const char* mqtt_get_base_topic(void) {
 }
 
 /**
+ * Get device ID (unique per device)
+ */
+const char* mqtt_get_device_id(void) {
+    return deviceId;
+}
+
+/**
+ * Build unique IDs and topics based on chip ID
+ */
+static void buildDeviceIds(void) {
+    uint64_t chipId = ESP.getEfuseMac();
+    uint32_t shortId = (uint32_t)(chipId & 0xFFFFFF);
+
+    char suffix[7];
+    snprintf(suffix, sizeof(suffix), "%06x", shortId);
+
+    snprintf(deviceId, sizeof(deviceId), "reptile_thermostat_%s", suffix);
+    snprintf(baseTopic, sizeof(baseTopic), "reptile/%s", deviceId);
+    snprintf(mqttClientId, sizeof(mqttClientId), "%s_%s", MQTT_CLIENT_ID_PREFIX, suffix);
+    snprintf(cloudBaseTopic, sizeof(cloudBaseTopic), "thermostat/%s", deviceId);
+    snprintf(cloudClientId, sizeof(cloudClientId), "%s_%s", CLOUD_CLIENT_ID_PREFIX, suffix);
+}
+
+/**
  * Build topic strings
  */
 static void buildTopics(void) {
@@ -633,12 +672,6 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 
-// Cloud MQTT configuration constants
-static const int CLOUD_DEFAULT_PORT = 8883;
-static const char* CLOUD_CLIENT_ID = "esp32_thermostat_cloud";
-static const unsigned long CLOUD_RECONNECT_INTERVAL = 10000; // 10 seconds
-static const int CLOUD_BUFFER_SIZE = 512;
-
 // Cloud MQTT state variables
 static WiFiClientSecure cloudWifiClient;
 static PubSubClient cloudMqttClient(cloudWifiClient);
@@ -646,9 +679,6 @@ static MQTTState_t cloudCurrentState = MQTT_STATE_DISCONNECTED;
 static unsigned long cloudLastConnectionAttempt = 0;
 static bool cloudEnabled = false;
 static bool cloudInitialized = false;
-
-// Cloud topic base - different namespace from local
-static char cloudBaseTopic[64] = "thermostat/reptile_thermostat_01";
 
 // Forward declaration
 static bool cloud_mqtt_connect(void);
@@ -671,6 +701,11 @@ void cloud_mqtt_init(void) {
     if (!cloudEnabled || server.length() == 0) {
         Serial.println("[CLOUD-MQTT] Cloud MQTT disabled or not configured");
         return;
+    }
+
+    // Ensure IDs are initialized
+    if (deviceId[0] == '\0') {
+        buildDeviceIds();
     }
 
     // Configure TLS with CA certificate
@@ -747,7 +782,7 @@ static bool cloud_mqtt_connect(void) {
 
     // Connect with LWT (Last Will and Testament)
     if (cloudMqttClient.connect(
-            CLOUD_CLIENT_ID,
+            cloudClientId,
             user.c_str(), password.c_str(),
             lwtTopic, 1, true, "false")) {
 
