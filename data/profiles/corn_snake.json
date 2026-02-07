@@ -1,0 +1,17 @@
+{
+  "id": "corn_snake",
+  "name": "Corn Snake",
+  "species": "Pantherophis guttatus",
+  "region": "North American Temperate Forest",
+  "temp_day_range": [24, 28],
+  "temp_night_range": [20, 23],
+  "basking_temp": 30,
+  "humidity_day": [40, 50],
+  "humidity_night": [50, 60],
+  "photoperiod_hours": 12,
+  "seasons": {
+    "dry": {"temp_modifier": 0, "humidity_modifier": -5},
+    "wet": {"temp_modifier": -1, "humidity_modifier": 5}
+  },
+  "notes": "Hardy species with wide temperature tolerance. Brumation at 10-15C for 2-3 months triggers breeding. Good beginner snake with simple care requirements."
+}

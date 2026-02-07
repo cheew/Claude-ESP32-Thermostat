@@ -14,6 +14,9 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <LittleFS.h>
+#include "profile_manager.h"
+#include "weather_client.h"
 
 // Web server instance
 static WebServer server(80);
@@ -32,7 +35,7 @@ static int powerOutput = 0;
 
 // Device info
 static char deviceName[32] = "Thermostat";
-static char firmwareVersion[16] = "1.3.3";
+static char firmwareVersion[16] = "2.5.0";
 
 // Network status
 static bool networkConnected = false;
@@ -111,6 +114,21 @@ static void handleSafetyPage(void);
 static void handleSafetyAPI(void);
 static void handleEmergencyStop(void);
 static void handleExitSafeMode(void);
+
+// Profile and wizard handlers
+static void handleProfilesAPI(void);
+static void handleActiveProfileAPI(void);
+static void handleApplyProfileAPI(void);
+static void handleWizardPage(void);
+static void handleFilesystemAPI(void);
+static void handleNotFound(void);
+
+// Weather handlers
+static void handleWeatherAPI(void);
+static void handleWeatherConfigAPI(void);
+
+// LittleFS file serving helper
+static bool serveLittleFSFile(const String& path);
 
 // HTML generation helpers
 static String buildCSS(void);
@@ -397,8 +415,33 @@ void webserver_init(void) {
         if (!isAuthenticated()) { requireAuth(); return; }
         String html = webserver_get_html_header("Outputs", "outputs");
 
-        html += "<h2>Output Configuration</h2>";
+        html += "<h2>Output Configuration <button class='help-btn' onclick='document.getElementById(\"helpOutputs\").classList.add(\"show\")'>?</button></h2>";
         html += "<p>Configure each output's settings, sensor assignment, and PID parameters.</p>";
+
+        // Help modal
+        html += "<div id='helpOutputs' class='help-overlay' onclick='if(event.target===this)this.classList.remove(\"show\")'>";
+        html += "<div class='help-modal'>";
+        html += "<button class='help-close' onclick='document.getElementById(\"helpOutputs\").classList.remove(\"show\")'>&times;</button>";
+        html += "<h2>Outputs Help</h2>";
+        html += "<h3>What are Outputs?</h3>";
+        html += "<p>Your thermostat has 3 independent outputs. Each can control a different device (heat mat, ceramic heater, light, fogger) with its own temperature target and control mode.</p>";
+        html += "<h3>Control Modes</h3>";
+        html += "<ul>";
+        html += "<li><strong>Off</strong> &ndash; Output disabled, no power sent</li>";
+        html += "<li><strong>Manual</strong> &ndash; Fixed power percentage (0-100%). No sensor needed</li>";
+        html += "<li><strong>PID (Auto)</strong> &ndash; Smooth automatic control using a PID algorithm. Best for heat mats and ceramic heaters</li>";
+        html += "<li><strong>On/Off</strong> &ndash; Simple thermostat: full power below target, off above. Good for basic setups</li>";
+        html += "<li><strong>Time-Proportional</strong> &ndash; PID output converted to timed ON/OFF cycles. Ideal for devices that shouldn't dim (e.g. some heat cables)</li>";
+        html += "<li><strong>Schedule</strong> &ndash; Follows the time-based schedule configured on the Schedule page</li>";
+        html += "<li><strong>Weather Sync</strong> &ndash; Target adjusts automatically based on outdoor weather forecast. Requires weather integration enabled in Settings and an active animal profile</li>";
+        html += "</ul>";
+        html += "<h3>Sensor Assignment</h3>";
+        html += "<p>Assign a DS18B20 temperature sensor to each output. The sensor reading drives automatic modes (PID, On/Off, Schedule). Choose <em>No Sensor</em> for lights or devices that don't need temperature feedback.</p>";
+        html += "<h3>PID Tuning</h3>";
+        html += "<p>Default values (Kp=10, Ki=0.5, Kd=2) work for most setups. Increase Kp for faster response, increase Ki to eliminate steady-state error, increase Kd to reduce overshoot.</p>";
+        html += "<h3>Safe Zone</h3>";
+        html += "<p>Target temperatures are limited to 15-35&deg;C by default. Tick the override checkbox to extend to 45&deg;C for basking spots. The Safety page provides additional hard limits.</p>";
+        html += "</div></div>";
 
         // Output selector tabs
         html += "<div style='display:flex;gap:10px;margin:20px 0'>";
@@ -431,7 +474,96 @@ void webserver_init(void) {
         html += "document.getElementById('out-tp-min-on').value=d.timeProp.minOnSec;";
         html += "document.getElementById('out-tp-min-off').value=d.timeProp.minOffSec;";
         html += "document.getElementById('device-info').innerHTML='<strong>Device:</strong> '+d.deviceType+' | <strong>Hardware:</strong> '+d.hardwareType;";
+        html += "handleModeChange(d.mode.toLowerCase());";
         html += "});}";
+
+        // Weather graph draw function
+        html += "function handleModeChange(mode){";
+        html += "let wg=document.getElementById('weather-graph-section');";
+        html += "if(mode==='weather'){wg.style.display='block';drawWeatherGraph();}else{wg.style.display='none';}}";
+
+        html += "function drawWeatherGraph(){";
+        html += "fetch('/api/v1/weather').then(r=>r.json()).then(d=>{";
+        html += "if(!d.forecast||d.forecast.length===0){";
+        html += "document.getElementById('weather-entries').innerHTML='<em>No forecast data yet. Weather will be fetched shortly.</em>';return;}";
+        html += "let canvas=document.getElementById('weatherGraph');if(!canvas)return;";
+        html += "let isDark=document.documentElement.classList.contains('dark-mode');";
+        html += "let dpr=window.devicePixelRatio||1;";
+        html += "let cw=canvas.clientWidth;let ch=canvas.clientHeight;";
+        html += "canvas.width=cw*dpr;canvas.height=ch*dpr;";
+        html += "let ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);";
+
+        // Sort forecast by time
+        html += "let pts=d.forecast.map(f=>({h:f.hour,m:f.minute,t:parseFloat(f.tempC)}));";
+        html += "pts.sort((a,b)=>(a.h*60+a.m)-(b.h*60+b.m));";
+
+        // Y-axis range
+        html += "let temps=pts.map(p=>p.t);";
+        html += "let minT=Math.min(...temps)-2;let maxT=Math.max(...temps)+2;";
+        html += "if(maxT-minT<4){minT-=2;maxT+=2;}";
+
+        // Layout
+        html += "let pad={top:15,right:15,bottom:25,left:45};";
+        html += "let gw=cw-pad.left-pad.right;let gh=ch-pad.top-pad.bottom;";
+        html += "let timeToX=function(h,m){return pad.left+((h*60+m)/1440)*gw;};";
+        html += "let tempToY=function(t){return pad.top+gh-((t-minT)/(maxT-minT))*gh;};";
+
+        // Clear
+        html += "ctx.clearRect(0,0,cw,ch);";
+
+        // Grid - horizontal
+        html += "ctx.strokeStyle=isDark?'#3d3d3d':'#e8e8e8';ctx.lineWidth=1;";
+        html += "let tStep=Math.ceil((maxT-minT)/5);if(tStep<1)tStep=1;";
+        html += "for(let t=Math.ceil(minT);t<=Math.floor(maxT);t+=tStep){";
+        html += "let y=tempToY(t);ctx.beginPath();ctx.moveTo(pad.left,y);ctx.lineTo(pad.left+gw,y);ctx.stroke();";
+        html += "ctx.fillStyle=isDark?'#b0b0b0':'#888';ctx.font='11px Arial';ctx.textAlign='right';ctx.textBaseline='middle';";
+        html += "ctx.fillText(t+'°',pad.left-5,y);}";
+
+        // Grid - vertical (hours)
+        html += "for(let h=0;h<=24;h+=3){";
+        html += "let x=timeToX(h,0);ctx.beginPath();ctx.strokeStyle=isDark?'#3d3d3d':'#e8e8e8';ctx.moveTo(x,pad.top);ctx.lineTo(x,pad.top+gh);ctx.stroke();";
+        html += "ctx.fillStyle=isDark?'#b0b0b0':'#888';ctx.font='11px Arial';ctx.textAlign='center';ctx.textBaseline='top';";
+        html += "let lbl=h===24?'0':String(h).padStart(2,'0');";
+        html += "ctx.fillText(lbl+':00',x,pad.top+gh+4);}";
+
+        // Draw filled area + line
+        html += "ctx.beginPath();ctx.moveTo(timeToX(pts[0].h,pts[0].m),pad.top+gh);";
+        html += "for(let i=0;i<pts.length;i++){ctx.lineTo(timeToX(pts[i].h,pts[i].m),tempToY(pts[i].t));}";
+        html += "ctx.lineTo(timeToX(pts[pts.length-1].h,pts[pts.length-1].m),pad.top+gh);ctx.closePath();";
+        html += "ctx.fillStyle=isDark?'rgba(33,150,243,0.15)':'rgba(33,150,243,0.1)';ctx.fill();";
+
+        // Line
+        html += "ctx.beginPath();";
+        html += "for(let i=0;i<pts.length;i++){";
+        html += "let x=timeToX(pts[i].h,pts[i].m);let y=tempToY(pts[i].t);";
+        html += "if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}";
+        html += "ctx.strokeStyle='#2196F3';ctx.lineWidth=2.5;ctx.stroke();";
+
+        // Dots + labels
+        html += "for(let i=0;i<pts.length;i++){";
+        html += "let x=timeToX(pts[i].h,pts[i].m);let y=tempToY(pts[i].t);";
+        html += "ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fillStyle='#2196F3';ctx.fill();";
+        html += "ctx.fillStyle=isDark?'#f0f0f0':'#333';ctx.font='bold 11px Arial';ctx.textAlign='center';ctx.textBaseline='bottom';";
+        html += "ctx.fillText(pts[i].t.toFixed(1)+'°',x,y-6);}";
+
+        // Current time marker
+        html += "let now=new Date();let nowMin=now.getHours()*60+now.getMinutes();";
+        html += "let nx=timeToX(now.getHours(),now.getMinutes());";
+        html += "ctx.beginPath();ctx.moveTo(nx,pad.top);ctx.lineTo(nx,pad.top+gh);";
+        html += "ctx.strokeStyle='#f44336';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);ctx.stroke();ctx.setLineDash([]);";
+
+        // Build text table of entries
+        html += "let html='<div style=\"display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px\">';";
+        html += "pts.forEach(p=>{html+='<div style=\"padding:6px;background:'+(isDark?'#2d2d2d':'#f0f0f0')+';border-radius:5px;text-align:center\">';";
+        html += "html+='<div style=\"font-weight:bold;color:#2196F3\">'+p.t.toFixed(1)+'°C</div>';";
+        html += "html+='<div style=\"font-size:11px;color:'+(isDark?'#b0b0b0':'#888')+'\">'+String(p.h).padStart(2,'0')+':'+String(p.m).padStart(2,'0')+'</div></div>';});";
+        html += "html+='</div>';";
+        html += "document.getElementById('weather-entries').innerHTML=html;";
+        html += "});};";
+
+        // Mode dropdown change event to show/hide weather graph
+        html += "document.getElementById('out-mode').addEventListener('change',function(){handleModeChange(this.value);});";
+
         html += "function saveConfig(){let data={";
         html += "name:document.getElementById('out-name').value,";
         html += "enabled:document.getElementById('out-enabled').checked,";
@@ -547,8 +679,16 @@ void webserver_init(void) {
         html += "<option value='onoff'>On/Off Thermostat</option>";
         html += "<option value='timeprop'>Time-Proportional</option>";
         html += "<option value='schedule'>Schedule</option>";
+        html += "<option value='weather'>Weather Sync</option>";
         html += "</select></label></div>";
         html += "<div style='margin:10px 0'><label>Manual Power (%): <input type='number' id='out-power' min='0' max='100' style='width:100px'></label></div>";
+
+        // Weather forecast graph (shown when weather mode selected)
+        html += "<div id='weather-graph-section' style='display:none;margin:15px 0;padding:15px;background:#e3f2fd;border-radius:8px'>";
+        html += "<h4 style='margin:0 0 10px 0'>24-Hour Weather Forecast</h4>";
+        html += "<canvas id='weatherGraph' style='width:100%;height:160px;display:block'></canvas>";
+        html += "<div id='weather-entries' style='margin-top:10px;font-size:13px'></div>";
+        html += "</div>";
 
         html += "<button onclick='saveControl()' style='margin:10px 5px 10px 0;padding:10px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer'>Apply Control</button>";
 
@@ -579,8 +719,36 @@ void webserver_init(void) {
     server.on("/sensors", []() {
         String html = webserver_get_html_header("Sensors", "sensors");
 
-        html += "<h2>Temperature Sensors</h2>";
+        html += "<h2>Temperature Sensors <button class='help-btn' onclick='document.getElementById(\"helpSensors\").classList.add(\"show\")'>?</button></h2>";
         html += "<p>Manage your DS18B20 temperature sensors. Rename sensors for easier identification.</p>";
+
+        // Help modal
+        html += "<div id='helpSensors' class='help-overlay' onclick='if(event.target===this)this.classList.remove(\"show\")'>";
+        html += "<div class='help-modal'>";
+        html += "<button class='help-close' onclick='document.getElementById(\"helpSensors\").classList.remove(\"show\")'>&times;</button>";
+        html += "<h2>Sensors Help</h2>";
+        html += "<h3>DS18B20 Temperature Sensors</h3>";
+        html += "<p>This thermostat uses DS18B20 digital temperature probes connected via a 1-Wire bus. They are waterproof, accurate to &plusmn;0.5&deg;C, and multiple sensors share a single data wire.</p>";
+        html += "<h3>Wiring</h3>";
+        html += "<ul>";
+        html += "<li><strong>Red</strong> &ndash; 3.3V power</li>";
+        html += "<li><strong>Black</strong> &ndash; Ground (GND)</li>";
+        html += "<li><strong>Yellow/White</strong> &ndash; Data (with 4.7k&ohm; pull-up resistor to 3.3V)</li>";
+        html += "</ul>";
+        html += "<p>All sensors connect in parallel to the same data pin. A single 4.7k&ohm; pull-up resistor is needed for the bus.</p>";
+        html += "<h3>Adding Sensors</h3>";
+        html += "<p>Power off the thermostat, connect the new sensor to the bus, then power on. Sensors are auto-discovered on boot and appear in the table above.</p>";
+        html += "<h3>Naming Sensors</h3>";
+        html += "<p>Click <em>Rename</em> to give each sensor a meaningful name (e.g. \"Hot End\", \"Cool End\", \"Ambient\"). Names are saved permanently and appear throughout the web UI.</p>";
+        html += "<h3>Sensor Addresses</h3>";
+        html += "<p>Each DS18B20 has a unique 64-bit ROM address (shown in the table). This address is used internally to track which sensor is assigned to which output, so sensors can be swapped without losing configuration.</p>";
+        html += "<h3>Troubleshooting</h3>";
+        html += "<ul>";
+        html += "<li>No sensors found &ndash; Check wiring and pull-up resistor, then restart</li>";
+        html += "<li>Reading -127&deg;C &ndash; Sensor disconnected or wiring fault</li>";
+        html += "<li>Readings jump around &ndash; Check for loose connections or interference</li>";
+        html += "</ul>";
+        html += "</div></div>";
 
         // Auto-refresh script
         html += "<script>function updateSensors(){fetch('/api/sensors').then(r=>r.json()).then(d=>{";
@@ -711,6 +879,24 @@ void webserver_init(void) {
     server.on("/update", handleUpdate);
     server.on("/api/upload", HTTP_POST, handleUploadDone, handleUpload);
 
+    // Profile API routes
+    server.on("/api/v1/profiles", HTTP_GET, handleProfilesAPI);
+    server.on("/api/v1/profiles/active", HTTP_GET, handleActiveProfileAPI);
+    server.on("/api/v1/profiles/apply", HTTP_POST, handleApplyProfileAPI);
+
+    // Wizard route
+    server.on("/wizard", HTTP_GET, handleWizardPage);
+
+    // Weather API
+    server.on("/api/v1/weather", HTTP_GET, handleWeatherAPI);
+    server.on("/api/v1/weather/config", HTTP_POST, handleWeatherConfigAPI);
+
+    // LittleFS filesystem info (debug)
+    server.on("/api/v1/filesystem", HTTP_GET, handleFilesystemAPI);
+
+    // Fallback: try serving from LittleFS for any unmatched route
+    server.onNotFound(handleNotFound);
+
     server.begin();
     Serial.println("[WebServer] Server started on port 80");
 }
@@ -720,6 +906,211 @@ void webserver_init(void) {
  */
 void webserver_task(void) {
     server.handleClient();
+}
+
+// ===== LittleFS File Serving =====
+
+static String getContentType(const String& filename) {
+    if (filename.endsWith(".html")) return "text/html";
+    if (filename.endsWith(".css")) return "text/css";
+    if (filename.endsWith(".js")) return "application/javascript";
+    if (filename.endsWith(".json")) return "application/json";
+    if (filename.endsWith(".png")) return "image/png";
+    if (filename.endsWith(".svg")) return "image/svg+xml";
+    if (filename.endsWith(".ico")) return "image/x-icon";
+    if (filename.endsWith(".csv")) return "text/csv";
+    return "text/plain";
+}
+
+static bool serveLittleFSFile(const String& path) {
+    String filePath = path;
+    if (filePath.endsWith("/")) filePath += "index.html";
+
+    if (LittleFS.exists(filePath)) {
+        File file = LittleFS.open(filePath, "r");
+        if (file) {
+            String contentType = getContentType(filePath);
+            server.streamFile(file, contentType);
+            file.close();
+            return true;
+        }
+    }
+    return false;
+}
+
+static void handleNotFound(void) {
+    String uri = server.uri();
+    if (serveLittleFSFile(uri)) return;
+    server.send(404, "text/plain", "Not Found");
+}
+
+// ===== Profile API Handlers =====
+
+static void handleProfilesAPI(void) {
+    int count = profile_manager_get_count();
+    DynamicJsonDocument doc(2048);
+    JsonArray profiles = doc.createNestedArray("profiles");
+
+    for (int i = 0; i < count; i++) {
+        const ProfileListEntry_t* entry = profile_manager_get_entry(i);
+        if (entry) {
+            JsonObject p = profiles.createNestedObject();
+            p["id"] = entry->id;
+            p["name"] = entry->name;
+        }
+    }
+    doc["count"] = count;
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+static void handleActiveProfileAPI(void) {
+    DynamicJsonDocument doc(256);
+    const char* activeId = profile_manager_get_active_id();
+    if (activeId && strlen(activeId) > 0) {
+        doc["active"] = true;
+        doc["id"] = activeId;
+    } else {
+        doc["active"] = false;
+        doc["id"] = (char*)nullptr;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+static void handleApplyProfileAPI(void) {
+    if (!isAuthenticated()) { requireAuthAPI(); return; }
+
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"No body\"}");
+        return;
+    }
+
+    DynamicJsonDocument doc(256);
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    if (err) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    const char* profileId = doc["id"];
+    if (!profileId) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"Missing id\"}");
+        return;
+    }
+
+    if (profile_manager_apply(profileId)) {
+        server.send(200, "application/json", "{\"ok\":true}");
+    } else {
+        server.send(404, "application/json", "{\"ok\":false,\"error\":\"Profile not found\"}");
+    }
+}
+
+static void handleWizardPage(void) {
+    if (!serveLittleFSFile("/wizard/wizard.html")) {
+        server.send(404, "text/plain", "Wizard not found. Upload LittleFS data first.");
+    }
+}
+
+static void handleFilesystemAPI(void) {
+    DynamicJsonDocument doc(512);
+    doc["totalBytes"] = LittleFS.totalBytes();
+    doc["usedBytes"] = LittleFS.usedBytes();
+    doc["freeBytes"] = LittleFS.totalBytes() - LittleFS.usedBytes();
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+// ===== Weather API Handlers =====
+
+static void handleWeatherAPI(void) {
+    DynamicJsonDocument doc(1024);
+
+    doc["enabled"] = weather_client_is_enabled();
+    doc["available"] = weather_client_is_available();
+    doc["timeAligned"] = weather_client_is_time_aligned();
+
+    if (weather_client_is_available()) {
+        const WeatherData_t* w = weather_client_get_data();
+        doc["tempC"] = serialized(String(w->tempC, 1));
+        doc["feelsLikeC"] = serialized(String(w->feelsLikeC, 1));
+        doc["humidity"] = serialized(String(w->humidity, 1));
+        doc["description"] = w->description;
+        doc["clouds"] = w->clouds;
+        doc["tempMinC"] = serialized(String(w->tempMinC, 1));
+        doc["tempMaxC"] = serialized(String(w->tempMaxC, 1));
+        doc["ageSeconds"] = (millis() - w->fetchTime) / 1000;
+        if (w->tzValid) {
+            doc["remoteTzOffset"] = w->remoteTzOffset;
+        }
+    }
+
+    // Include 24h forecast history entries
+    int histCount = weather_client_get_history_count();
+    if (histCount > 0) {
+        JsonArray forecast = doc.createNestedArray("forecast");
+        for (int i = 0; i < histCount; i++) {
+            uint8_t h, m;
+            float t;
+            if (weather_client_get_history_entry(i, &h, &m, &t)) {
+                JsonObject entry = forecast.createNestedObject();
+                entry["hour"] = h;
+                entry["minute"] = m;
+                entry["tempC"] = serialized(String(t, 1));
+            }
+        }
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+static void handleWeatherConfigAPI(void) {
+    if (!isAuthenticated()) { requireAuthAPI(); return; }
+
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"error\":\"POST required\"}");
+        return;
+    }
+
+    DynamicJsonDocument doc(512);
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+
+    if (err) {
+        server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    const char* apiKey = doc["apiKey"] | "";
+    const char* city = doc["city"] | "";
+    bool enabled = doc["enabled"] | false;
+    uint8_t interval = doc["intervalHours"] | 3;
+
+    // If apiKey is empty, preserve existing
+    String effectiveKey = String(apiKey);
+    if (effectiveKey.length() == 0) {
+        Preferences prefs;
+        prefs.begin("thermostat", true);
+        effectiveKey = prefs.getString("weather_key", "");
+        prefs.end();
+    }
+
+    weather_client_save_config(effectiveKey.c_str(), city, enabled, interval);
+
+    // Optionally force an immediate fetch
+    bool fetchNow = doc["fetchNow"] | false;
+    if (fetchNow && enabled) {
+        weather_client_force_fetch();
+    }
+
+    server.send(200, "application/json", "{\"success\":true}");
 }
 
 /**
@@ -791,6 +1182,17 @@ void webserver_add_log(const char* message) {
  * Handle root page (/) - Simple or Advanced mode
  */
 static void handleRoot(void) {
+    // First-boot: redirect to wizard if setup not complete
+    Preferences wizardPrefs;
+    wizardPrefs.begin("thermostat", true);
+    bool wizardComplete = wizardPrefs.getBool("wizard_done", false);
+    wizardPrefs.end();
+    if (!wizardComplete && LittleFS.exists("/wizard/wizard.html")) {
+        server.sendHeader("Location", "/wizard");
+        server.send(302, "text/plain", "Redirecting to setup wizard...");
+        return;
+    }
+
     String html = webserver_get_html_header("Home", "home");
 
     if (networkAPMode) {
@@ -838,6 +1240,7 @@ static void handleRoot(void) {
         html += "<script>";
         // Update function
         html += "function updateSimple(){fetch('/api/outputs').then(r=>r.json()).then(d=>{";
+        html += "let isDark=document.documentElement.classList.contains('dark-mode');";
         html += "d.outputs.forEach((o,i)=>{let id=i+1;";
         html += "let card=document.getElementById('card'+id);";
         html += "if(!card)return;";
@@ -850,6 +1253,9 @@ static void handleRoot(void) {
         html += "if(o.inFault){faultChip.className='fault-chip fault';faultChip.innerText=o.faultState;clearBtn.style.display='block';}";
         html += "else if(o.sensorHealth!=='OK'){faultChip.className='fault-chip stale';faultChip.innerText=o.sensorHealth;clearBtn.style.display='none';}";
         html += "else{faultChip.className='fault-chip ok';clearBtn.style.display='none';}";
+        // Weather sync indicator
+        html += "let wChip=document.getElementById('weatherChip'+id);";
+        html += "if(wChip)wChip.style.display=o.weatherSync?'inline-block':'none';";
         html += "});}).catch(e=>console.error(e));}";
 
         // Control functions
@@ -876,6 +1282,101 @@ static void handleRoot(void) {
         html += "fetch('/api/output/'+id+'/clear-fault',{method:'POST'}).then(r=>r.json()).then(d=>{";
         html += "if(d.ok){updateSimple();}else{alert('Cannot clear fault: '+d.error.message);}";
         html += "}).catch(e=>alert('Error: '+e));}";
+
+        // Mini schedule graph drawing
+        html += "function drawMini(canvasId,slots){";
+        html += "let canvas=document.getElementById(canvasId);if(!canvas)return;";
+        html += "let isDark=document.documentElement.classList.contains('dark-mode');";
+        html += "let dpr=window.devicePixelRatio||1;";
+        html += "let cw=canvas.clientWidth;let ch=canvas.clientHeight;";
+        html += "canvas.width=cw*dpr;canvas.height=ch*dpr;";
+        html += "let ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);";
+        html += "let active=slots.filter(s=>s.enabled);";
+        html += "active.sort((a,b)=>(a.hour*60+a.minute)-(b.hour*60+b.minute));";
+        html += "if(active.length===0){ctx.fillStyle=isDark?'#555':'#ccc';ctx.font='11px Arial';ctx.textAlign='center';";
+        html += "ctx.fillText('No schedule',cw/2,ch/2);return;}";
+        html += "let temps=active.map(s=>s.targetTemp);";
+        html += "let minT=Math.min(...temps)-2;let maxT=Math.max(...temps)+2;";
+        html += "if(maxT-minT<4){minT-=2;maxT+=2;}";
+        html += "let pad={top:2,right:2,bottom:2,left:2};";
+        html += "let gw=cw-pad.left-pad.right;let gh=ch-pad.top-pad.bottom;";
+        html += "let timeToX=function(h,m){return pad.left+((h*60+m)/1440)*gw;};";
+        html += "let tempToY=function(t){return pad.top+gh-((t-minT)/(maxT-minT))*gh;};";
+        // Build curve points
+        html += "let pts=[];let first=active[0];let last=active[active.length-1];";
+        html += "if(active.length>1&&last.rampToNext){";
+        html += "let wD=1440-(last.hour*60+last.minute)+(first.hour*60+first.minute);";
+        html += "let tM=last.targetTemp+(first.targetTemp-last.targetTemp)*((1440-(last.hour*60+last.minute))/wD);";
+        html += "pts.push({x:timeToX(0,0),y:tempToY(tM)});";
+        html += "}else{pts.push({x:timeToX(0,0),y:tempToY(last.targetTemp)});}";
+        html += "for(let i=0;i<active.length;i++){let s=active[i];let x=timeToX(s.hour,s.minute);let y=tempToY(s.targetTemp);";
+        html += "if(i>0&&!active[i-1].rampToNext){pts.push({x:x,y:tempToY(active[i-1].targetTemp)});}";
+        html += "pts.push({x:x,y:y});}";
+        html += "pts.push({x:timeToX(24,0),y:tempToY(last.targetTemp)});";
+        // Fill
+        html += "ctx.beginPath();ctx.moveTo(pts[0].x,pad.top+gh);";
+        html += "for(let p of pts)ctx.lineTo(p.x,p.y);";
+        html += "ctx.lineTo(pts[pts.length-1].x,pad.top+gh);ctx.closePath();";
+        html += "ctx.fillStyle=isDark?'rgba(76,175,80,0.2)':'rgba(76,175,80,0.15)';ctx.fill();";
+        // Line
+        html += "ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);";
+        html += "for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);";
+        html += "ctx.strokeStyle=isDark?'#66BB6A':'#4CAF50';ctx.lineWidth=1.5;ctx.stroke();";
+        // Current time marker
+        html += "let now=new Date();let nx=timeToX(0,now.getHours()*60+now.getMinutes());";
+        html += "ctx.beginPath();ctx.moveTo(nx,0);ctx.lineTo(nx,ch);";
+        html += "ctx.strokeStyle='#f44336';ctx.lineWidth=1;ctx.setLineDash([2,2]);ctx.stroke();ctx.setLineDash([]);}";
+
+        // Load mini graphs for outputs in schedule mode
+        html += "function loadMiniGraphs(){";
+        html += "for(let id=1;id<=3;id++){";
+        html += "let canvas=document.getElementById('miniGraph'+id);if(!canvas)continue;";
+        html += "fetch('/api/output/'+id).then(r=>r.json()).then(d=>{";
+        html += "drawMini('miniGraph'+id,d.schedule||[]);";
+        html += "}).catch(()=>{});}};";
+        html += "loadMiniGraphs();";
+
+        // Mini weather forecast graph
+        html += "function drawMiniWeather(canvasId,forecast){";
+        html += "let canvas=document.getElementById(canvasId);if(!canvas||!forecast||forecast.length===0)return;";
+        html += "let isDark=document.documentElement.classList.contains('dark-mode');";
+        html += "let dpr=window.devicePixelRatio||1;";
+        html += "let cw=canvas.clientWidth;let ch=canvas.clientHeight;";
+        html += "canvas.width=cw*dpr;canvas.height=ch*dpr;";
+        html += "let ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);";
+        html += "let pts=forecast.map(f=>({h:f.hour,m:f.minute,t:parseFloat(f.tempC)}));";
+        html += "pts.sort((a,b)=>(a.h*60+a.m)-(b.h*60+b.m));";
+        html += "let temps=pts.map(p=>p.t);let minT=Math.min(...temps)-1;let maxT=Math.max(...temps)+1;";
+        html += "if(maxT-minT<2){minT-=1;maxT+=1;}";
+        html += "let pad={top:4,right:4,bottom:4,left:4};";
+        html += "let gw=cw-pad.left-pad.right;let gh=ch-pad.top-pad.bottom;";
+        html += "let timeToX=function(h,m){return pad.left+((h*60+m)/1440)*gw;};";
+        html += "let tempToY=function(t){return pad.top+gh-((t-minT)/(maxT-minT))*gh;};";
+        html += "ctx.clearRect(0,0,cw,ch);";
+        // Fill
+        html += "ctx.beginPath();ctx.moveTo(timeToX(pts[0].h,pts[0].m),pad.top+gh);";
+        html += "for(let p of pts)ctx.lineTo(timeToX(p.h,p.m),tempToY(p.t));";
+        html += "ctx.lineTo(timeToX(pts[pts.length-1].h,pts[pts.length-1].m),pad.top+gh);ctx.closePath();";
+        html += "ctx.fillStyle=isDark?'rgba(33,150,243,0.2)':'rgba(33,150,243,0.15)';ctx.fill();";
+        // Line
+        html += "ctx.beginPath();ctx.moveTo(timeToX(pts[0].h,pts[0].m),tempToY(pts[0].t));";
+        html += "for(let i=1;i<pts.length;i++)ctx.lineTo(timeToX(pts[i].h,pts[i].m),tempToY(pts[i].t));";
+        html += "ctx.strokeStyle=isDark?'#64B5F6':'#2196F3';ctx.lineWidth=1.5;ctx.stroke();";
+        // Current time marker
+        html += "let now=new Date();let nx=timeToX(now.getHours(),now.getMinutes());";
+        html += "ctx.beginPath();ctx.moveTo(nx,0);ctx.lineTo(nx,ch);";
+        html += "ctx.strokeStyle='#f44336';ctx.lineWidth=1;ctx.setLineDash([2,2]);ctx.stroke();ctx.setLineDash([]);}";
+
+        // Load mini weather graphs
+        html += "function loadMiniWeatherGraphs(){";
+        html += "let hasWeatherCanvas=false;";
+        html += "for(let id=1;id<=3;id++){if(document.getElementById('miniWeather'+id)){hasWeatherCanvas=true;break;}}";
+        html += "if(!hasWeatherCanvas)return;";
+        html += "fetch('/api/v1/weather').then(r=>r.json()).then(d=>{";
+        html += "if(!d.forecast)return;";
+        html += "for(let id=1;id<=3;id++){drawMiniWeather('miniWeather'+id,d.forecast);}";
+        html += "}).catch(()=>{});}";
+        html += "loadMiniWeatherGraphs();";
 
         // Start polling
         html += "updateSimple();setInterval(updateSimple,3000);";
@@ -913,6 +1414,7 @@ static void handleRoot(void) {
                 faultChipClass += " ok";
             }
             html += "<span id='faultChip" + String(id) + "' class='" + faultChipClass + "'>" + faultText + "</span>";
+            html += "<span id='weatherChip" + String(id) + "' style='display:none;margin-left:6px;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:bold;background:#e3f2fd;color:#1565c0'>&#x1F326; Syncing</span>";
 
             html += "</span>";
             html += "<span style='font-size:12px;color:#999'>Output " + String(id) + "</span></h3>";
@@ -944,6 +1446,7 @@ static void handleRoot(void) {
             html += "<option value='pid'" + String(output->controlMode == CONTROL_MODE_PID ? " selected" : "") + ">PID (Auto)</option>";
             html += "<option value='onoff'" + String(output->controlMode == CONTROL_MODE_ONOFF ? " selected" : "") + ">On/Off</option>";
             html += "<option value='timeprop'" + String(output->controlMode == CONTROL_MODE_TIME_PROP ? " selected" : "") + ">Time-Prop</option>";
+            html += "<option value='weather'" + String(output->controlMode == CONTROL_MODE_WEATHER ? " selected" : "") + ">Weather</option>";
             html += "</select>";
             html += "</div>";
 
@@ -959,6 +1462,22 @@ static void handleRoot(void) {
             // Clear fault button (shown only when in fault)
             String clearBtnStyle = output->faultState != FAULT_NONE ? "block" : "none";
             html += "<button id='clearFault" + String(id) + "' class='clear-fault-btn' style='display:" + clearBtnStyle + "' onclick='clearFault(" + String(id) + ")'>Clear Fault</button>";
+
+            // Mini schedule graph
+            if (output->controlMode == CONTROL_MODE_SCHEDULE) {
+                html += "<div style='margin-top:12px;border-top:1px solid #eee;padding-top:8px'>";
+                html += "<div style='font-size:11px;color:#999;margin-bottom:4px'>Today's Schedule</div>";
+                html += "<canvas id='miniGraph" + String(id) + "' style='width:100%;height:55px;display:block'></canvas>";
+                html += "</div>";
+            }
+
+            // Mini weather forecast graph
+            if (output->controlMode == CONTROL_MODE_WEATHER) {
+                html += "<div style='margin-top:12px;border-top:1px solid #eee;padding-top:8px'>";
+                html += "<div style='font-size:11px;color:#999;margin-bottom:4px'>24h Weather Forecast</div>";
+                html += "<canvas id='miniWeather" + String(id) + "' style='width:100%;height:55px;display:block'></canvas>";
+                html += "</div>";
+            }
 
             html += "</div>";
         }
@@ -980,6 +1499,8 @@ static void handleRoot(void) {
         html += "let card=document.getElementById('output'+id);";
         html += "card.style.background=isDark?(o.heating?'#3d1f1f':'#1e3d1f'):(o.heating?'#ffebee':'#e8f5e9');";
         html += "card.style.opacity=o.enabled?'1':'0.5';";
+        html += "let wBadge=document.getElementById('weatherBadge'+id);";
+        html += "if(wBadge)wBadge.style.display=o.weatherSync?'inline-block':'none';";
         html += "});});}updateOutputs();setInterval(updateOutputs,2000);</script>";
 
         html += "<h2>Outputs</h2>";
@@ -995,7 +1516,9 @@ static void handleRoot(void) {
 
             html += "<div id='output" + String(id) + "' style='background:" + bgColor + ";padding:15px;border-radius:8px;";
             html += "box-shadow:0 2px 5px rgba(0,0,0,0.1);opacity:" + String(output->enabled ? "1" : "0.5") + "'>";
-            html += "<h3 style='margin:0 0 10px 0'>" + String(output->name) + " (Output " + String(id) + ")</h3>";
+            html += "<h3 style='margin:0 0 10px 0'>" + String(output->name) + " (Output " + String(id) + ")";
+            html += "<span id='weatherBadge" + String(id) + "' style='display:none;margin-left:8px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold;background:#e3f2fd;color:#1565c0'>&#x1F326; Weather</span>";
+            html += "</h3>";
 
             // Status info
             html += "<div style='margin:8px 0'><strong>Current:</strong> <span id='temp" + String(id) + "'>" + String(output->currentTemp, 1) + "°C</span></div>";
@@ -1277,7 +1800,27 @@ static void handleInfo(void) {
     html += "<div class='stat-card'><div class='stat-value'>" + String(powerOutput) + "%</div><div class='stat-label'>Power Output</div></div>";
     html += "<div class='stat-card'><div class='stat-value'>" + String(currentMode) + "</div><div class='stat-label'>Mode</div></div>";
     html += "</div>";
-    
+
+    html += "<h2>Weather Integration</h2>";
+    if (weather_client_is_enabled()) {
+        html += "<div class='stat-grid'>";
+        if (weather_client_is_available()) {
+            const WeatherData_t* w = weather_client_get_data();
+            html += "<div class='stat-card'><div class='stat-value' style='color:#2196F3'>" + String(w->tempC, 1) + "°C</div><div class='stat-label'>Outdoor Temp</div></div>";
+            html += "<div class='stat-card'><div class='stat-value' style='color:#2196F3'>" + String(w->description) + "</div><div class='stat-label'>Conditions</div></div>";
+            unsigned long ageSec = (millis() - w->fetchTime) / 1000;
+            String ageStr = String(ageSec / 60) + "m ago";
+            html += "<div class='stat-card'><div class='stat-value' style='color:#2196F3'>" + ageStr + "</div><div class='stat-label'>Last Fetch</div></div>";
+        } else {
+            html += "<div class='stat-card'><div class='stat-value' style='color:#ff9800'>Waiting</div><div class='stat-label'>Status</div></div>";
+        }
+        int histCount = weather_client_get_history_count();
+        html += "<div class='stat-card'><div class='stat-value' style='color:#2196F3'>" + String(histCount) + "</div><div class='stat-label'>Forecast Entries</div></div>";
+        html += "</div>";
+    } else {
+        html += "<div class='info-box'>Weather integration is disabled. Enable it in <a href='/settings'>Settings</a>.</div>";
+    }
+
     html += webserver_get_html_footer(millis() / 1000);
     server.send(200, "text/html", html);
 }
@@ -1558,6 +2101,50 @@ static void handleSettings(void) {
         html += "</span></div>";
     }
 
+    // Weather integration section
+    {
+        Preferences weatherPrefs;
+        weatherPrefs.begin("thermostat", true);
+        bool weatherOn = weatherPrefs.getBool("weather_on", false);
+        String wCity = weatherPrefs.getString("weather_city", "");
+        uint8_t wInterval = weatherPrefs.getUChar("weather_hrs", 3);
+        // Don't show API key value for security
+        bool hasKey = weatherPrefs.getString("weather_key", "").length() > 0;
+        weatherPrefs.end();
+
+        html += "<h2>Weather Integration</h2>";
+        html += "<div class='info-box'>Fetches outdoor weather from OpenWeatherMap to optionally adjust habitat temperatures within profile bounds.</div>";
+
+        html += "<div class='control'><label><input type='checkbox' name='weather_enabled' value='1'";
+        if (weatherOn) html += " checked";
+        html += "> Enable Weather Sync</label></div>";
+
+        html += "<div class='control'><label>API Key:</label>";
+        html += "<input type='password' name='weather_key' placeholder='";
+        if (hasKey) html += "********"; else html += "Enter OWM API key";
+        html += "'></div>";
+        html += "<p style='color:#666;font-size:14px'>Get a free API key at <a href='https://openweathermap.org/api' target='_blank'>openweathermap.org</a>. Leave blank to keep current key.</p>";
+
+        html += "<div class='control'><label>City:</label>";
+        html += "<input type='text' name='weather_city' value='" + wCity + "' placeholder='London,UK'></div>";
+
+        html += "<div class='control'><label>Fetch Interval (hours):</label>";
+        html += "<input type='number' name='weather_interval' value='" + String(wInterval) + "' min='1' max='6'></div>";
+
+        html += "<div class='control'><label>Status:</label><span>";
+        if (weather_client_is_enabled()) {
+            if (weather_client_is_available()) {
+                const WeatherData_t* w = weather_client_get_data();
+                html += "<span style='color:green'>" + String(w->tempC, 1) + "&deg;C, " + String(w->description) + "</span>";
+            } else {
+                html += "<span style='color:orange'>Waiting for data...</span>";
+            }
+        } else {
+            html += "<span style='color:gray'>Disabled</span>";
+        }
+        html += "</span></div>";
+    }
+
     html += "<h2>PID Tuning</h2>";
     html += "<div class='control'><label>Kp (Proportional):</label>";
     html += "<input type='number' name='kp' value='" + String(kp, 2) + "' step='0.1' min='0'></div>";
@@ -1567,7 +2154,11 @@ static void handleSettings(void) {
     html += "<input type='number' name='kd' value='" + String(kd, 2) + "' step='0.1' min='0'></div>";
     
     html += "<button type='submit'>Save All Settings</button></form>";
-    
+
+    html += "<h2>Setup Wizard</h2>";
+    html += "<div class='info-box'>Rerun the setup wizard to reconfigure your animal profile, outputs, and network settings.</div>";
+    html += "<a href='/wizard/wizard.html'><button type='button' class='btn-secondary'>Rerun Setup Wizard</button></a>";
+
     html += "<h2>Firmware</h2>";
     html += "<div class='info-box'><strong>Current Version:</strong> " + String(firmwareVersion) + "</div>";
     html += "<div id='update-status'></div>";
@@ -1619,8 +2210,37 @@ static void handleSchedule(void) {
     String html = webserver_get_html_header("Schedule", "schedule");
 
     html += "<div style='margin:20px 0;display:flex;justify-content:space-between;align-items:center'>";
-    html += "<h2 style='margin:0'>Temperature Schedule</h2>";
+    html += "<h2 style='margin:0'>Temperature Schedule <button class='help-btn' onclick='document.getElementById(\"helpSchedule\").classList.add(\"show\")'>?</button></h2>";
     html += "</div>";
+
+    // Help modal
+    html += "<div id='helpSchedule' class='help-overlay' onclick='if(event.target===this)this.classList.remove(\"show\")'>";
+    html += "<div class='help-modal'>";
+    html += "<button class='help-close' onclick='document.getElementById(\"helpSchedule\").classList.remove(\"show\")'>&times;</button>";
+    html += "<h2>Schedule Help</h2>";
+    html += "<h3>How Scheduling Works</h3>";
+    html += "<p>Each output has up to 12 independent time slots. When an output is in <em>Schedule</em> mode, it follows these slots to change its target temperature throughout the day.</p>";
+    html += "<h3>Creating a Schedule</h3>";
+    html += "<ul>";
+    html += "<li>Tick the <strong>Enable</strong> checkbox to activate a slot</li>";
+    html += "<li>Set the <strong>Time</strong> (hour and minute) when this temperature should take effect</li>";
+    html += "<li>Set the <strong>Target Temperature</strong> for that time period</li>";
+    html += "<li>Optionally add a <strong>Label</strong> (e.g. Dawn, Basking, Night)</li>";
+    html += "</ul>";
+    html += "<h3>Day Selection</h3>";
+    html += "<p>Each slot can run on specific days of the week. Click the day buttons (S M T W T F S) to toggle them. A slot with no days selected is effectively disabled.</p>";
+    html += "<h3>Ramp vs Step</h3>";
+    html += "<ul>";
+    html += "<li><strong>Step</strong> (default) &ndash; Temperature jumps instantly when a slot activates</li>";
+    html += "<li><strong>Ramp</strong> &ndash; Temperature gradually transitions from the current slot to the next slot over the intervening time. Great for simulating natural sunrise/sunset</li>";
+    html += "</ul>";
+    html += "<h3>The Graph</h3>";
+    html += "<p>The 24-hour graph above the slots shows a visual preview of your schedule. Green area shows the temperature curve, dots mark each slot. The red dashed line shows the current time. The graph updates live as you edit.</p>";
+    html += "<h3>Weather Sync</h3>";
+    html += "<p>If Weather Integration is enabled in Settings, scheduled temperatures can be adjusted based on outdoor conditions. A cloud badge appears on the home page for affected outputs. The adjustment stays within the bounds defined by your animal profile.</p>";
+    html += "<h3>Import / Export</h3>";
+    html += "<p>Use the CSV buttons to export your schedule for backup or import one from another device.</p>";
+    html += "</div></div>";
 
     // Output selector dropdown
     html += "<div style='margin:20px 0;padding:15px;background:#f0f0f0;border-radius:8px'>";
@@ -1639,12 +2259,25 @@ static void handleSchedule(void) {
     html += "<div id='next-schedule-info' style='margin-top:15px;padding:12px;background:#e3f2fd;border-radius:5px;border-left:4px solid #2196F3;display:none'>";
     html += "<strong>⏰ Next Scheduled Change:</strong> <span id='next-schedule-text'></span>";
     html += "</div>";
+    html += "<div id='weather-mode-notice' style='margin-top:10px;padding:12px;background:#fff3e0;border-radius:5px;border-left:4px solid #ff9800;display:none'>";
+    html += "<strong>🌤️ Weather Sync Active</strong> &mdash; This output is in Weather Sync mode. Temperatures are set automatically from the outdoor forecast. The schedule below is not used in this mode.";
+    html += "</div>";
+    html += "</div>";
+
+    // 24-hour schedule graph
+    html += "<div id='graph-container' style='margin:20px 0;padding:15px;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1)'>";
+    html += "<h3 style='margin:0 0 10px 0'>24-Hour Schedule</h3>";
+    html += "<canvas id='scheduleGraph' style='width:100%;height:180px;display:block'></canvas>";
     html += "</div>";
 
     // Schedule slots container (will be filled by JavaScript)
     html += "<div id='schedule-slots' style='margin:20px 0'></div>";
 
-    html += "<button type='button' onclick='saveSchedule()' style='margin:20px 0;padding:12px 30px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px'>Save Schedule</button>";
+    html += "<div style='display:flex;gap:10px;flex-wrap:wrap;margin:20px 0'>";
+    html += "<button type='button' onclick='saveSchedule()' style='padding:12px 30px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px'>Save Schedule</button>";
+    html += "<button type='button' onclick='exportCSV()' style='padding:12px 20px;background:#2196F3;color:white;border:none;border-radius:5px;cursor:pointer'>Export CSV</button>";
+    html += "<button type='button' onclick='importCSV()' style='padding:12px 20px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer'>Import CSV</button>";
+    html += "</div>";
 
     html += "<div style='margin:20px 0;padding:15px;background:#e3f2fd;border-radius:8px'>";
     html += "<h4 style='margin:0 0 10px 0'>💡 Schedule Tips</h4>";
@@ -1662,12 +2295,141 @@ static void handleSchedule(void) {
     html += "let currentOutputId=0;";
     html += "let currentSchedule=[];";
 
+    // Read schedule from DOM inputs (live preview), fallback to currentSchedule
+    html += "function getSlotsFromDOM(){";
+    html += "let slots=[];";
+    html += "for(let i=0;i<12;i++){";
+    html += "let el=document.getElementById('enabled'+i);";
+    html += "if(!el)return currentSchedule.filter(s=>s.enabled);";
+    html += "if(!el.checked)continue;";
+    html += "slots.push({hour:parseInt(document.getElementById('hour'+i).value)||0,";
+    html += "minute:parseInt(document.getElementById('minute'+i).value)||0,";
+    html += "targetTemp:parseFloat(document.getElementById('temp'+i).value)||28,";
+    html += "rampToNext:document.getElementById('ramp'+i).checked,";
+    html += "label:document.getElementById('label'+i).value||''});}";
+    html += "return slots;}";
+
+    // Draw the 24-hour schedule graph on canvas
+    html += "function drawGraph(){";
+    html += "let canvas=document.getElementById('scheduleGraph');if(!canvas)return;";
+    html += "let isDark=document.documentElement.classList.contains('dark-mode');";
+    html += "let container=canvas.parentElement;";
+    html += "container.style.background=isDark?'#1e1e1e':'#fff';";
+    html += "container.querySelector('h3').style.color=isDark?'#f0f0f0':'#333';";
+    html += "let dpr=window.devicePixelRatio||1;";
+    html += "let cw=canvas.clientWidth;let ch=canvas.clientHeight;";
+    html += "canvas.width=cw*dpr;canvas.height=ch*dpr;";
+    html += "let ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);";
+    html += "let slots=getSlotsFromDOM();";
+    html += "slots.sort((a,b)=>(a.hour*60+a.minute)-(b.hour*60+b.minute));";
+
+    // Padding and dimensions
+    html += "let pad={top:15,right:15,bottom:25,left:45};";
+    html += "let gw=cw-pad.left-pad.right;let gh=ch-pad.top-pad.bottom;";
+
+    // Empty state
+    html += "if(slots.length===0){ctx.clearRect(0,0,cw,ch);";
+    html += "ctx.fillStyle=isDark?'#888':'#999';ctx.font='14px Arial';ctx.textAlign='center';";
+    html += "ctx.fillText('No active schedule slots',cw/2,ch/2);return;}";
+
+    // Y-axis range from temps
+    html += "let temps=slots.map(s=>s.targetTemp);";
+    html += "let minT=Math.min(...temps)-2;let maxT=Math.max(...temps)+2;";
+    html += "if(maxT-minT<4){minT-=2;maxT+=2;}";
+
+    // Conversion helpers
+    html += "let timeToX=function(h,m){return pad.left+((h*60+m)/1440)*gw;};";
+    html += "let tempToY=function(t){return pad.top+gh-((t-minT)/(maxT-minT))*gh;};";
+
+    // Clear and draw background
+    html += "ctx.clearRect(0,0,cw,ch);";
+
+    // Grid lines - horizontal (temp)
+    html += "ctx.strokeStyle=isDark?'#3d3d3d':'#e8e8e8';ctx.lineWidth=1;";
+    html += "let tStep=Math.ceil((maxT-minT)/5);if(tStep<1)tStep=1;";
+    html += "for(let t=Math.ceil(minT);t<=Math.floor(maxT);t+=tStep){";
+    html += "let y=tempToY(t);ctx.beginPath();ctx.moveTo(pad.left,y);ctx.lineTo(pad.left+gw,y);ctx.stroke();";
+    html += "ctx.fillStyle=isDark?'#b0b0b0':'#888';ctx.font='11px Arial';ctx.textAlign='right';ctx.textBaseline='middle';";
+    html += "ctx.fillText(t+'°',pad.left-5,y);}";
+
+    // Grid lines - vertical (hours)
+    html += "for(let h=0;h<=24;h+=3){";
+    html += "let x=timeToX(h,0);ctx.beginPath();ctx.strokeStyle=isDark?'#3d3d3d':'#e8e8e8';ctx.moveTo(x,pad.top);ctx.lineTo(x,pad.top+gh);ctx.stroke();";
+    html += "ctx.fillStyle=isDark?'#b0b0b0':'#888';ctx.font='11px Arial';ctx.textAlign='center';ctx.textBaseline='top';";
+    html += "let lbl=h===24?'0':String(h).padStart(2,'0');";
+    html += "ctx.fillText(lbl+':00',x,pad.top+gh+4);}";
+
+    // Build point array for the curve (step/ramp)
+    html += "let pts=[];";
+    // Before first slot: use last slot's temp (24h wrap)
+    html += "let firstT=slots[0].targetTemp;let lastT=slots[slots.length-1].targetTemp;";
+    html += "let firstMin=slots[0].hour*60+slots[0].minute;";
+    html += "let lastMin=slots[slots.length-1].hour*60+slots[slots.length-1].minute;";
+    // Handle wrap: if last slot ramps to next, ramp from last to first through midnight
+    html += "if(slots.length>1&&slots[slots.length-1].rampToNext){";
+    html += "let wrapDist=1440-lastMin+firstMin;";
+    html += "let tAtMidnight=lastT+(firstT-lastT)*((1440-lastMin)/wrapDist);";
+    html += "pts.push({x:timeToX(0,0),y:tempToY(tAtMidnight)});";
+    html += "}else{pts.push({x:timeToX(0,0),y:tempToY(lastT)});}";
+
+    // Walk through slots
+    html += "for(let i=0;i<slots.length;i++){";
+    html += "let s=slots[i];let x=timeToX(s.hour,s.minute);let y=tempToY(s.targetTemp);";
+    // Step: hold previous temp until this slot's time, then jump
+    html += "if(i>0&&!slots[i-1].rampToNext){pts.push({x:x,y:tempToY(slots[i-1].targetTemp)});}";
+    html += "pts.push({x:x,y:y});";
+    html += "}";
+
+    // After last slot to midnight
+    html += "let lastSlot=slots[slots.length-1];";
+    html += "if(lastSlot.rampToNext&&slots.length>1){";
+    html += "let wrapDist=1440-lastMin+firstMin;";
+    html += "let tAt24=lastT+(firstT-lastT)*((1440-lastMin)/wrapDist);";
+    html += "pts.push({x:timeToX(24,0),y:tempToY(tAt24)});";
+    html += "}else{pts.push({x:timeToX(24,0),y:tempToY(lastSlot.targetTemp)});}";
+
+    // Draw filled area under curve
+    html += "ctx.beginPath();ctx.moveTo(pts[0].x,pad.top+gh);";
+    html += "for(let p of pts)ctx.lineTo(p.x,p.y);";
+    html += "ctx.lineTo(pts[pts.length-1].x,pad.top+gh);ctx.closePath();";
+    html += "ctx.fillStyle=isDark?'rgba(76,175,80,0.15)':'rgba(76,175,80,0.12)';ctx.fill();";
+
+    // Draw the line
+    html += "ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);";
+    html += "for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);";
+    html += "ctx.strokeStyle=isDark?'#66BB6A':'#4CAF50';ctx.lineWidth=2.5;ctx.stroke();";
+
+    // Draw slot dots and labels
+    html += "for(let s of slots){let x=timeToX(s.hour,s.minute);let y=tempToY(s.targetTemp);";
+    html += "ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fillStyle=isDark?'#81C784':'#388E3C';ctx.fill();";
+    html += "ctx.strokeStyle=isDark?'#1e1e1e':'#fff';ctx.lineWidth=1.5;ctx.stroke();";
+    // Label
+    html += "if(s.label){ctx.fillStyle=isDark?'#d0d0d0':'#333';ctx.font='10px Arial';ctx.textAlign='center';";
+    html += "ctx.fillText(s.label,x,y-10);}}";
+
+    // Current time marker
+    html += "let now=new Date();let nowMin=now.getHours()*60+now.getMinutes();";
+    html += "let nx=timeToX(0,nowMin);";
+    html += "ctx.beginPath();ctx.moveTo(nx,pad.top);ctx.lineTo(nx,pad.top+gh);";
+    html += "ctx.strokeStyle='#f44336';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);ctx.stroke();ctx.setLineDash([]);";
+    // Time label on marker
+    html += "ctx.fillStyle='#f44336';ctx.font='bold 10px Arial';ctx.textAlign='center';";
+    html += "ctx.fillText(now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0'),nx,pad.top-3);";
+
+    // Axis border
+    html += "ctx.strokeStyle=isDark?'#555':'#ccc';ctx.lineWidth=1;ctx.setLineDash([]);";
+    html += "ctx.strokeRect(pad.left,pad.top,gw,gh);";
+
+    html += "}";
+
     // Load schedule from API
     html += "function loadSchedule(){";
     html += "currentOutputId=parseInt(document.getElementById('output-selector').value);";
     html += "fetch('/api/output/'+(currentOutputId+1)).then(r=>r.json()).then(d=>{";
     html += "currentSchedule=d.schedule||[];";
-    html += "document.getElementById('current-output-info').innerHTML='Currently viewing schedule for <strong>'+d.name+'</strong>';";
+    html += "document.getElementById('current-output-info').innerHTML='Currently viewing schedule for <strong>'+d.name+'</strong> (Mode: '+d.mode+')';";
+    html += "let wNotice=document.getElementById('weather-mode-notice');";
+    html += "if(d.mode.toLowerCase()==='weather'){wNotice.style.display='block';}else{wNotice.style.display='none';}";
     html += "renderSlots();";
     html += "updateNextSchedule();";
     html += "});}";
@@ -1702,27 +2464,33 @@ static void handleSchedule(void) {
     html += "let isDark=document.body.classList.contains('dark-mode');";
     html += "let html='';";
     html += "let dayNames=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];";
-    html += "for(let i=0;i<8;i++){";
-    html += "let slot=currentSchedule[i]||{enabled:false,hour:0,minute:0,targetTemp:28.0,days:''};";
-    html += "slot.days=slot.days||'';";  // Ensure days is always a string
-    html += "let isActive=slot.enabled&&slot.days.length>0;";
+    html += "for(let i=0;i<12;i++){";
+    html += "let slot=currentSchedule[i]||{enabled:false,hour:0,minute:0,targetTemp:28.0,days:'',rampToNext:false,label:''};";
+    html += "slot.days=slot.days||'';slot.label=slot.label||'';";
+    html += "let isActive=slot.enabled;";
     html += "let activeBg=isDark?'#1e3d1f':'#f1f8f4';";
     html += "let inactiveBg=isDark?'#2d2d2d':'#f9f9f9';";
     html += "let borderColor=isDark?'#3d3d3d':'#ddd';";
     html += "html+='<div class=\"schedule-slot\" style=\"border:2px solid '+(isActive?'#4CAF50':borderColor)+';";
     html += "padding:15px;border-radius:10px;margin:15px 0;background:'+(isActive?activeBg:inactiveBg)+'\">';";
     html += "html+='<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:10px\">';";
-    html += "html+='<strong>Slot '+(i+1)+'</strong>';";
+    html += "html+='<strong>'+(slot.label||'Slot '+(i+1))+'</strong>';";
     html += "html+='<label style=\"display:flex;align-items:center;gap:5px\">';";
     html += "html+='<input type=\"checkbox\" id=\"enabled'+i+'\" '+(isActive?'checked':'')+' style=\"width:auto\">';";
     html += "html+='<span>Active</span></label></div>';";
 
-    // Time and temperature inputs
-    html += "html+='<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0\">';";
+    // Time, temp, label, and ramp inputs
+    html += "html+='<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr 2fr;gap:10px;margin:10px 0\">';";
     html += "html+='<div><label>Hour</label><input type=\"number\" id=\"hour'+i+'\" value=\"'+slot.hour+'\" min=\"0\" max=\"23\"></div>';";
     html += "html+='<div><label>Minute</label><input type=\"number\" id=\"minute'+i+'\" value=\"'+slot.minute+'\" min=\"0\" max=\"59\"></div>';";
     html += "html+='<div><label>Temp (°C)</label><input type=\"number\" id=\"temp'+i+'\" value=\"'+slot.targetTemp+'\" step=\"0.5\" min=\"15\" max=\"45\"></div>';";
+    html += "html+='<div><label>Label</label><input type=\"text\" id=\"label'+i+'\" value=\"'+slot.label+'\" maxlength=\"15\" placeholder=\"e.g. Dawn\"></div>';";
     html += "html+='</div>';";
+
+    // Ramp toggle
+    html += "html+='<div style=\"margin:8px 0\"><label style=\"display:flex;align-items:center;gap:5px\">';";
+    html += "html+='<input type=\"checkbox\" id=\"ramp'+i+'\" '+(slot.rampToNext?'checked':'')+' style=\"width:auto\">';";
+    html += "html+='<span>Smooth ramp to next slot</span></label></div>';";
 
     // Day selector
     html += "html+='<div><label>Active Days:</label>';";
@@ -1741,28 +2509,57 @@ static void handleSchedule(void) {
     html += "html+=dayNames[d]+'</label>';}";
     html += "html+='</div></div>';";
     html += "html+='</div>';}";
-    html += "document.getElementById('schedule-slots').innerHTML=html;}";
+    html += "document.getElementById('schedule-slots').innerHTML=html;drawGraph();}";
 
     // Save schedule to API
     html += "function saveSchedule(){";
     html += "let schedule=[];";
-    html += "for(let i=0;i<8;i++){";
+    html += "for(let i=0;i<12;i++){";
     html += "let enabled=document.getElementById('enabled'+i).checked;";
     html += "let hour=parseInt(document.getElementById('hour'+i).value)||0;";
     html += "let minute=parseInt(document.getElementById('minute'+i).value)||0;";
     html += "let targetTemp=parseFloat(document.getElementById('temp'+i).value)||28.0;";
+    html += "let label=document.getElementById('label'+i).value||'';";
+    html += "let rampToNext=document.getElementById('ramp'+i).checked;";
     html += "let days='';";
     html += "for(let d=0;d<7;d++){";
     html += "if(document.getElementById('day'+i+'_'+d).checked){";
     html += "days+='SMTWTFS'[d];}}";
-    html += "schedule.push({enabled:enabled&&days.length>0,hour:hour,minute:minute,targetTemp:targetTemp,days:days});}";
+    html += "schedule.push({enabled:enabled,hour:hour,minute:minute,targetTemp:targetTemp,days:days,rampToNext:rampToNext,label:label});}";
     html += "fetch('/api/output/'+(currentOutputId+1)+'/config',{";
     html += "method:'POST',headers:{'Content-Type':'application/json'},";
     html += "body:JSON.stringify({schedule:schedule})})";
     html += ".then(r=>r.ok?alert('Schedule saved!'):alert('Error saving schedule'));}";
 
+    // CSV Export
+    html += "function exportCSV(){";
+    html += "let csv='time,target,days,ramp,label\\n';";
+    html += "for(let i=0;i<12;i++){";
+    html += "let s=currentSchedule[i];if(!s||!s.enabled)continue;";
+    html += "let time=String(s.hour).padStart(2,'0')+':'+String(s.minute).padStart(2,'0');";
+    html += "csv+=time+','+s.targetTemp+','+(s.days||'SMTWTFS')+','+(s.rampToNext?1:0)+','+(s.label||'')+\"\\n\";}";
+    html += "let blob=new Blob([csv],{type:'text/csv'});let a=document.createElement('a');";
+    html += "a.href=URL.createObjectURL(blob);a.download='schedule_output'+(currentOutputId+1)+'.csv';a.click();}";
+
+    // CSV Import
+    html += "function importCSV(){let input=document.createElement('input');input.type='file';input.accept='.csv';";
+    html += "input.onchange=function(e){let reader=new FileReader();reader.onload=function(ev){";
+    html += "let lines=ev.target.result.trim().split('\\n');let schedule=[];";
+    html += "for(let i=1;i<lines.length&&schedule.length<12;i++){";
+    html += "let parts=lines[i].split(',');if(parts.length<2)continue;";
+    html += "let timeParts=parts[0].split(':');";
+    html += "schedule.push({enabled:true,hour:parseInt(timeParts[0]),minute:parseInt(timeParts[1]),";
+    html += "targetTemp:parseFloat(parts[1]),days:parts[2]||'SMTWTFS',rampToNext:(parts[3]||'0')==='1',label:parts[4]||''});}";
+    html += "while(schedule.length<12)schedule.push({enabled:false,hour:0,minute:0,targetTemp:28,days:'',rampToNext:false,label:''});";
+    html += "currentSchedule=schedule;renderSlots();alert('CSV imported - click Save to apply');};";
+    html += "reader.readAsText(e.target.files[0]);};input.click();}";
+
     // Initialize on page load
     html += "loadSchedule();";
+    // Live graph updates when editing schedule inputs
+    html += "document.getElementById('schedule-slots').addEventListener('input',drawGraph);";
+    html += "document.getElementById('schedule-slots').addEventListener('change',drawGraph);";
+    html += "window.addEventListener('resize',drawGraph);";
     html += "</script>";
 
     html += webserver_get_html_footer(millis() / 1000);
@@ -1849,7 +2646,34 @@ static void handleSaveSettings(void) {
 
     Serial.printf("[WebServer] Secure mode: %s\n", secureMode ? "ON" : "OFF");
 
+    // Wizard completion flag
+    if (server.hasArg("wizard_complete")) {
+        prefs.putBool("wizard_done", true);
+        Serial.println("[WebServer] Setup wizard marked complete");
+    }
+
     prefs.end();
+
+    // Save weather settings (uses weather_client_save_config which opens its own Preferences)
+    {
+        bool weatherOn = server.hasArg("weather_enabled");
+        String wKey = server.hasArg("weather_key") ? server.arg("weather_key") : "";
+        String wCity = server.hasArg("weather_city") ? server.arg("weather_city") : "";
+        uint8_t wInterval = server.hasArg("weather_interval") ?
+                            (uint8_t)server.arg("weather_interval").toInt() : 3;
+
+        // Only update key if new one provided (don't overwrite with blank)
+        if (wKey.length() > 0 || wCity.length() > 0) {
+            // If key is blank, preserve existing
+            if (wKey.length() == 0) {
+                Preferences tmpPrefs;
+                tmpPrefs.begin("thermostat", true);
+                wKey = tmpPrefs.getString("weather_key", "");
+                tmpPrefs.end();
+            }
+            weather_client_save_config(wKey.c_str(), wCity.c_str(), weatherOn, wInterval);
+        }
+    }
     
     String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     html += "<meta http-equiv='refresh' content='5;url=/'>";
@@ -2086,7 +2910,16 @@ String webserver_get_html_header(const char* title, const char* activePage) {
     html += "<script>if(localStorage.getItem('darkMode')==='true'||((!localStorage.getItem('darkMode'))&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark-mode');}</script>";
     html += "</head><body><div class='container'>";
     html += "<div class='header'>";
-    html += "<h1>" + String(deviceName) + "</h1>";
+    // Show animal emoji next to device name if a profile is active
+    String animalEmoji = "";
+    const char* activeId = profile_manager_get_active_id();
+    if (activeId && strlen(activeId) > 0) {
+        String pid = String(activeId);
+        if (pid.indexOf("python") >= 0 || pid.indexOf("snake") >= 0) animalEmoji = "&#x1F40D; ";
+        else if (pid.indexOf("dragon") >= 0 || pid.indexOf("gecko") >= 0) animalEmoji = "&#x1F98E; ";
+        else animalEmoji = "&#x1F98E; ";  // Default reptile
+    }
+    html += "<h1>" + animalEmoji + String(deviceName) + "</h1>";
     html += "<div class='subtitle'>ESP32 Reptile Thermostat v" + String(firmwareVersion) + "</div>";
     html += "<div id='current-time' style='font-size:14px;margin-top:8px;opacity:0.95'></div>";
     html += "<script>";
@@ -2132,7 +2965,7 @@ String webserver_get_html_footer(unsigned long uptimeSeconds) {
  * GET /api/outputs - Get all outputs status
  */
 static void handleOutputsAPI(void) {
-    StaticJsonDocument<1536> doc;
+    StaticJsonDocument<2048> doc;
     JsonArray outputs = doc.createNestedArray("outputs");
 
     for (int i = 0; i < 3; i++) {
@@ -2156,6 +2989,9 @@ static void handleOutputsAPI(void) {
         obj["sensorHealth"] = output_manager_get_sensor_health_name(output->sensorHealth);
         obj["faultState"] = output_manager_get_fault_name(output->faultState);
         obj["inFault"] = (output->faultState != FAULT_NONE);
+
+        // Weather sync indicator
+        obj["weatherSync"] = weather_client_is_syncing_output(i);
     }
 
     String response;
@@ -2182,7 +3018,7 @@ static void handleOutputAPI(void) {
         return;
     }
 
-    StaticJsonDocument<1024> doc;
+    DynamicJsonDocument doc(4096);
     doc["id"] = outputId;
     doc["name"] = output->name;
     doc["enabled"] = output->enabled;
@@ -2237,7 +3073,8 @@ static void handleOutputAPI(void) {
         slot["hour"] = output->schedule[i].hour;
         slot["minute"] = output->schedule[i].minute;
         slot["targetTemp"] = serialized(String(output->schedule[i].targetTemp, 1));
-        // Ensure days is always a valid string (null-terminated)
+        slot["rampToNext"] = output->schedule[i].rampToNext;
+        slot["label"] = output->schedule[i].label;
         char daysBuf[8];
         strncpy(daysBuf, output->schedule[i].days, 7);
         daysBuf[7] = '\0';
@@ -2298,6 +3135,7 @@ static void handleOutputControl(void) {
         else if (strcmp(modeStr, "onoff") == 0) mode = CONTROL_MODE_ONOFF;
         else if (strcmp(modeStr, "timeprop") == 0) mode = CONTROL_MODE_TIME_PROP;
         else if (strcmp(modeStr, "schedule") == 0) mode = CONTROL_MODE_SCHEDULE;
+        else if (strcmp(modeStr, "weather") == 0) mode = CONTROL_MODE_WEATHER;
 
         output_manager_set_mode(outputIndex, mode);
     }
@@ -2338,7 +3176,7 @@ static void handleOutputConfig(void) {
         return;
     }
 
-    StaticJsonDocument<1024> doc;
+    DynamicJsonDocument doc(4096);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
 
     if (error) {
@@ -2385,13 +3223,17 @@ static void handleOutputConfig(void) {
     // Update schedule
     if (doc.containsKey("schedule")) {
         JsonArray schedule = doc["schedule"];
-        for (int i = 0; i < schedule.size() && i < MAX_SCHEDULE_SLOTS; i++) {
+        for (int i = 0; i < (int)schedule.size() && i < MAX_SCHEDULE_SLOTS; i++) {
             JsonObject slot = schedule[i];
             bool enabled = slot["enabled"];
             int hour = slot["hour"];
             int minute = slot["minute"];
-            float target = slot["target"];
-            output_manager_set_schedule_slot(outputIndex, i, enabled, hour, minute, target);
+            // Accept both "targetTemp" and "target" for compatibility
+            float target = slot.containsKey("targetTemp") ? (float)slot["targetTemp"] : (float)slot["target"];
+            const char* days = slot["days"] | "";
+            bool rampToNext = slot["rampToNext"] | false;
+            const char* label = slot["label"] | "";
+            output_manager_set_schedule_slot(outputIndex, i, enabled, hour, minute, target, days, rampToNext, label);
         }
     }
 
@@ -2603,8 +3445,18 @@ static String buildCSS(void) {
     css += ".dark-mode .temp-display small{color:#b0b0b0}";
 
     // Simple card styling
+    css += ".dark-mode .simple-card{background:#2d2d2d;box-shadow:0 2px 8px rgba(0,0,0,0.4)}";
+    css += ".dark-mode .simple-card.heating{background:linear-gradient(135deg,#3d1f1f,#2d2d2d);border-left-color:#f44336}";
+    css += ".dark-mode .simple-card.fault{background:linear-gradient(135deg,#3d1f1f,#2d2d2d)}";
     css += ".dark-mode .simple-card h3{color:#f0f0f0}";
+    css += ".dark-mode .simple-card .temp-display{color:#f0f0f0}";
+    css += ".dark-mode .simple-card .temp-display small{color:#b0b0b0}";
     css += ".dark-mode .target-row label,.dark-mode .mode-row label,.dark-mode .power-row label{color:#b0b0b0}";
+    css += ".dark-mode .target-row .target-val{color:#f0f0f0}";
+    css += ".dark-mode .power-row .power-val{color:#f0f0f0}";
+    css += ".dark-mode .mode-row select{background:#3d3d3d;color:#f0f0f0;border-color:#4d4d4d}";
+    css += ".dark-mode .status-indicator.off{background:#555}";
+    css += ".dark-mode [id^='weatherChip'],.dark-mode [id^='weatherBadge']{background:#1a2a3a !important;color:#64b5f6 !important}";
 
     // Panel backgrounds (override inline styles)
     css += ".dark-mode div[style*='background:#f9f9f9']{background:#2d2d2d !important}";
@@ -2622,6 +3474,24 @@ static String buildCSS(void) {
 
     css += "*{transition:background-color 0.3s,color 0.3s,border-color 0.3s}";
 
+    // Help modal styles
+    css += ".help-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;min-height:32px;min-width:32px;background:#2196F3;color:white;border:none;border-radius:50%;cursor:pointer;font-size:16px;font-weight:bold;padding:0;margin-left:10px;vertical-align:middle;flex:none}";
+    css += ".help-btn:hover{background:#0b7dda}";
+    css += ".help-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;justify-content:center;align-items:center}";
+    css += ".help-overlay.show{display:flex}";
+    css += ".help-modal{background:white;border-radius:12px;padding:25px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto;position:relative;box-shadow:0 4px 20px rgba(0,0,0,0.3)}";
+    css += ".help-modal h3{margin-top:15px;color:#4CAF50;font-size:1.05em}";
+    css += ".help-modal h3:first-of-type{margin-top:5px}";
+    css += ".help-modal p,.help-modal li{font-size:0.92em;line-height:1.6;color:#444}";
+    css += ".help-modal ul{padding-left:20px;margin:5px 0 10px 0}";
+    css += ".help-close{position:absolute;top:10px;right:15px;background:none;border:none;font-size:24px;cursor:pointer;color:#888;width:auto;min-height:auto;padding:5px}";
+    css += ".help-close:hover{color:#333;background:none}";
+    css += ".dark-mode .help-modal{background:#1e1e1e;color:#f0f0f0}";
+    css += ".dark-mode .help-modal h3{color:#4CAF50}";
+    css += ".dark-mode .help-modal p,.dark-mode .help-modal li{color:#d0d0d0}";
+    css += ".dark-mode .help-close{color:#888}";
+    css += ".dark-mode .help-close:hover{color:#f0f0f0;background:none}";
+
     css += "</style>";
 
     return css;
@@ -2633,14 +3503,14 @@ static String buildCSS(void) {
 static String buildNavBar(const char* activePage) {
     String nav = "<div class='nav'>";
 
-    // Home always visible
+    // Home and Schedule always visible
     nav += "<a href='/' class='" + String(strcmp(activePage, "home") == 0 ? "active" : "") + "'>🏠 Home</a>";
+    nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
 
     // Advanced mode pages
     if (advancedMode) {
         nav += "<a href='/outputs' class='" + String(strcmp(activePage, "outputs") == 0 ? "active" : "") + "'>💡 Outputs</a>";
         nav += "<a href='/sensors' class='" + String(strcmp(activePage, "sensors") == 0 ? "active" : "") + "'>🌡️ Sensors</a>";
-        nav += "<a href='/schedule' class='" + String(strcmp(activePage, "schedule") == 0 ? "active" : "") + "'>📅 Schedule</a>";
         nav += "<a href='/history' class='" + String(strcmp(activePage, "history") == 0 ? "active" : "") + "'>📈 History</a>";
         nav += "<a href='/info' class='" + String(strcmp(activePage, "info") == 0 ? "active" : "") + "'>ℹ️ Info</a>";
         nav += "<a href='/logs' class='" + String(strcmp(activePage, "logs") == 0 ? "active" : "") + "'>📋 Logs</a>";

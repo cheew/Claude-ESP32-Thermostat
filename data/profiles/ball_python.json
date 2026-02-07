@@ -1,0 +1,17 @@
+{
+  "id": "ball_python",
+  "name": "Ball Python",
+  "species": "Python regius",
+  "region": "West African Savanna",
+  "temp_day_range": [26, 30],
+  "temp_night_range": [24, 26],
+  "basking_temp": 32,
+  "humidity_day": [50, 60],
+  "humidity_night": [60, 70],
+  "photoperiod_hours": 12,
+  "seasons": {
+    "dry": {"temp_modifier": 1, "humidity_modifier": -15},
+    "wet": {"temp_modifier": -1, "humidity_modifier": 10}
+  },
+  "notes": "Need warm and cool hides. Humidity critical for healthy sheds. Reduce feeding and temps slightly in winter for breeding cycles."
+}

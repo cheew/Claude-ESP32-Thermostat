@@ -5,6 +5,8 @@
 
 #include "logger.h"
 #include <Arduino.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define MAX_LOG_ENTRIES 20
 #define MAX_LOG_LENGTH 128
@@ -23,16 +25,26 @@ void logger_init(unsigned long boot_time_ms) {
 }
 
 void logger_add(const char* message) {
-    // Calculate uptime
-    unsigned long uptime = (millis() - boot_time) / 1000;
-    unsigned long hours = uptime / 3600;
-    unsigned long minutes = (uptime % 3600) / 60;
-    unsigned long seconds = uptime % 60;
+    // Try real-time clock (NTP), fall back to uptime
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    char ts[16];
+
+    if (tv.tv_sec > 1577836800) {  // After 2020-01-01 = NTP synced
+        struct tm timeinfo;
+        localtime_r(&tv.tv_sec, &timeinfo);
+        snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    } else {
+        // Fall back to uptime
+        unsigned long uptime = (millis() - boot_time) / 1000;
+        snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu",
+                 uptime / 3600, (uptime % 3600) / 60, uptime % 60);
+    }
 
     // Format timestamp and message
     snprintf(log_buffer[log_index], MAX_LOG_LENGTH,
-             "[%02lu:%02lu:%02lu] %s",
-             hours, minutes, seconds, message);
+             "[%s] %s", ts, message);
 
     // Print to serial
     Serial.println(log_buffer[log_index]);

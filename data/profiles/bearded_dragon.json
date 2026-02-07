@@ -1,0 +1,17 @@
+{
+  "id": "bearded_dragon",
+  "name": "Bearded Dragon",
+  "species": "Pogona vitticeps",
+  "region": "Australian Desert",
+  "temp_day_range": [28, 32],
+  "temp_night_range": [22, 25],
+  "basking_temp": 40,
+  "humidity_day": [30, 40],
+  "humidity_night": [40, 50],
+  "photoperiod_hours": 12,
+  "seasons": {
+    "dry": {"temp_modifier": 0, "humidity_modifier": -10},
+    "wet": {"temp_modifier": -2, "humidity_modifier": 10}
+  },
+  "notes": "Require strong basking spot with UVB. Cool end should stay 24-28C. Brumation in winter with reduced temps and photoperiod."
+}

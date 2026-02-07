@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reptile Thermostat - Setup Wizard</title>
+    <link rel="stylesheet" href="/wizard/wizard.css">
+</head>
+<body>
+    <div class="wizard-container">
+        <div class="wizard-header">
+            <h1>Reptile Thermostat Setup</h1>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="step-indicator" id="step-indicator">Step 1 of 7</div>
+        </div>
+
+        <!-- Step 1: Welcome -->
+        <div class="wizard-step active" id="step-1">
+            <h2>Welcome!</h2>
+            <p>Let's set up your reptile thermostat. This wizard will guide you through configuring your device for the perfect habitat.</p>
+            <div class="form-group">
+                <label for="device-name">Device Name</label>
+                <input type="text" id="device-name" placeholder="e.g. Havoc's Vivarium" maxlength="31">
+            </div>
+            <div class="form-group">
+                <label for="device-location">Location (optional)</label>
+                <input type="text" id="device-location" placeholder="e.g. Living Room">
+            </div>
+        </div>
+
+        <!-- Step 2: Animal Selection -->
+        <div class="wizard-step" id="step-2">
+            <h2>What animal do you keep?</h2>
+            <p>Select your animal and we'll configure optimal temperatures automatically.</p>
+            <div class="animal-grid" id="animal-grid">
+                <div class="animal-card" onclick="selectAnimal('custom')">
+                    <div class="animal-icon">&#9881;</div>
+                    <div class="animal-name">Custom Setup</div>
+                    <div class="animal-desc">Configure manually</div>
+                </div>
+            </div>
+            <div id="profile-preview" class="profile-preview" style="display:none">
+                <h3 id="preview-name"></h3>
+                <div class="preview-grid">
+                    <div class="preview-item">
+                        <span class="preview-label">Day Temp</span>
+                        <span class="preview-value" id="preview-day-temp"></span>
+                    </div>
+                    <div class="preview-item">
+                        <span class="preview-label">Night Temp</span>
+                        <span class="preview-value" id="preview-night-temp"></span>
+                    </div>
+                    <div class="preview-item">
+                        <span class="preview-label">Basking</span>
+                        <span class="preview-value" id="preview-basking"></span>
+                    </div>
+                    <div class="preview-item">
+                        <span class="preview-label">Light Hours</span>
+                        <span class="preview-value" id="preview-photo"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 3: Climate Preset -->
+        <div class="wizard-step" id="step-3">
+            <h2>Climate Mode</h2>
+            <p>How should temperatures be managed?</p>
+            <div class="option-cards">
+                <div class="option-card selected" onclick="selectClimate('auto')">
+                    <h3>Auto from Profile</h3>
+                    <p>Use the recommended temperatures for your animal</p>
+                </div>
+                <div class="option-card" onclick="selectClimate('manual')">
+                    <h3>Manual Custom</h3>
+                    <p>Set your own temperature targets</p>
+                </div>
+                <div class="option-card" onclick="selectClimate('weather')">
+                    <h3>Weather Sync</h3>
+                    <p>Adjust based on real outdoor weather (requires API key)</p>
+                </div>
+            </div>
+            <div id="manual-temps" style="display:none">
+                <div class="form-group">
+                    <label for="custom-day-temp">Day Temperature (C)</label>
+                    <input type="number" id="custom-day-temp" value="30" min="15" max="45" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="custom-night-temp">Night Temperature (C)</label>
+                    <input type="number" id="custom-night-temp" value="24" min="15" max="40" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="custom-basking">Basking Temperature (C)</label>
+                    <input type="number" id="custom-basking" value="35" min="20" max="50" step="0.5">
+                </div>
+            </div>
+            <div id="weather-config" style="display:none">
+                <div class="form-group">
+                    <label for="weather-api-key">OpenWeatherMap API Key</label>
+                    <input type="text" id="weather-api-key" placeholder="Your free API key">
+                    <small>Get one free at openweathermap.org</small>
+                </div>
+                <div class="form-group">
+                    <label for="weather-city">City</label>
+                    <input type="text" id="weather-city" placeholder="e.g. London,UK">
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 4: Season Mode -->
+        <div class="wizard-step" id="step-4">
+            <h2>Season Mode</h2>
+            <p>Some animals benefit from seasonal temperature variation.</p>
+            <div class="option-cards">
+                <div class="option-card selected" onclick="selectSeason('standard')">
+                    <h3>Year-Round</h3>
+                    <p>Same temperatures all year (recommended for most keepers)</p>
+                </div>
+                <div class="option-card" onclick="selectSeason('dry')">
+                    <h3>Dry Season</h3>
+                    <p>Slightly lower humidity, adjusted temps</p>
+                </div>
+                <div class="option-card" onclick="selectSeason('wet')">
+                    <h3>Wet Season</h3>
+                    <p>Higher humidity, slightly cooler</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 5: Output Configuration -->
+        <div class="wizard-step" id="step-5">
+            <h2>Output Configuration</h2>
+            <p>Configure your heating outputs. Discovered sensors will be assigned automatically.</p>
+            <div id="sensor-list" class="info-box">
+                <strong>Discovered Sensors:</strong>
+                <div id="sensors-found">Scanning...</div>
+            </div>
+            <div class="output-config" id="output-configs">
+                <div class="output-card">
+                    <h3>Output 1 - AC Dimmer</h3>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="out1-name" placeholder="e.g. Basking Lamp" maxlength="31">
+                    </div>
+                    <div class="form-group">
+                        <label>Control Mode</label>
+                        <select id="out1-mode">
+                            <option value="pid">PID (Auto)</option>
+                            <option value="onoff">On/Off Thermostat</option>
+                            <option value="schedule">Schedule</option>
+                            <option value="manual">Manual</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="output-card">
+                    <h3>Output 2 - SSR</h3>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="out2-name" placeholder="e.g. Heat Mat" maxlength="31">
+                    </div>
+                    <div class="form-group">
+                        <label>Control Mode</label>
+                        <select id="out2-mode">
+                            <option value="pid">PID (Auto)</option>
+                            <option value="onoff">On/Off Thermostat</option>
+                            <option value="schedule">Schedule</option>
+                            <option value="manual">Manual</option>
+                            <option value="off" selected>Off</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="output-card">
+                    <h3>Output 3 - Relay</h3>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="out3-name" placeholder="e.g. Ceramic Heater" maxlength="31">
+                    </div>
+                    <div class="form-group">
+                        <label>Control Mode</label>
+                        <select id="out3-mode">
+                            <option value="pid">PID (Auto)</option>
+                            <option value="onoff">On/Off Thermostat</option>
+                            <option value="schedule">Schedule</option>
+                            <option value="manual">Manual</option>
+                            <option value="off" selected>Off</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 6: Network -->
+        <div class="wizard-step" id="step-6">
+            <h2>Network Settings</h2>
+            <p id="wifi-description">Checking WiFi status...</p>
+            <div class="info-box" id="wifi-status">
+                WiFi: Checking...
+            </div>
+            <div id="wifi-config" style="display:none">
+                <div class="form-group">
+                    <label for="wifi-ssid">WiFi Network Name (SSID)</label>
+                    <input type="text" id="wifi-ssid" placeholder="Your WiFi network name" maxlength="31">
+                </div>
+                <div class="form-group">
+                    <label for="wifi-pass-input">WiFi Password</label>
+                    <input type="password" id="wifi-pass-input" placeholder="WiFi password" maxlength="63">
+                </div>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="mqtt-enable" style="width:auto"> Enable MQTT</label>
+            </div>
+            <div id="mqtt-settings" style="display:none">
+                <div class="form-group">
+                    <label for="mqtt-broker">MQTT Broker IP</label>
+                    <input type="text" id="mqtt-broker" placeholder="192.168.1.100">
+                </div>
+                <div class="form-group">
+                    <label for="mqtt-port">Port</label>
+                    <input type="number" id="mqtt-port" value="1883">
+                </div>
+                <div class="form-group">
+                    <label for="mqtt-user">Username</label>
+                    <input type="text" id="mqtt-user" placeholder="Optional">
+                </div>
+                <div class="form-group">
+                    <label for="mqtt-pass">Password</label>
+                    <input type="password" id="mqtt-pass" placeholder="Optional">
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 7: Review -->
+        <div class="wizard-step" id="step-7">
+            <h2>Review & Apply</h2>
+            <p>Check your settings before applying.</p>
+            <div class="review-section" id="review-content"></div>
+            <div class="warning-box">
+                <strong>Note:</strong> The device will save settings and may restart. Your schedule will be auto-generated from the selected animal profile.
+            </div>
+        </div>
+
+        <!-- Navigation -->
+        <div class="wizard-nav">
+            <button id="btn-prev" onclick="prevStep()" style="display:none">Back</button>
+            <div class="spacer"></div>
+            <button id="btn-next" onclick="nextStep()">Next</button>
+            <button id="btn-finish" onclick="applyWizard()" style="display:none">Apply Settings</button>
+        </div>
+    </div>
+
+    <script src="/wizard/wizard.js"></script>
+</body>
+</html>

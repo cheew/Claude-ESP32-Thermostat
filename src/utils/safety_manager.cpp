@@ -105,10 +105,19 @@ void safety_manager_mark_stable(void) {
     if (safetyState.stableTime == 0) {
         safetyState.stableTime = millis();
         safetyState.bootCount = 0;  // Reset boot counter
-        saveSafetyState();
 
-        Serial.println("[SafetyMgr] Boot marked as stable - boot counter reset");
-        console_add_event(CONSOLE_EVENT_SYSTEM, "Boot stable - safety counters reset");
+        // Auto-exit safe mode if cause was boot loop (stable boot proves loop resolved)
+        if (safetyState.safeMode && safetyState.safeModeReason == SAFE_MODE_BOOT_LOOP) {
+            safetyState.safeMode = false;
+            safetyState.safeModeReason = SAFE_MODE_NONE;
+            Serial.println("[SafetyMgr] Boot stable - auto-exiting safe mode (boot loop resolved)");
+            console_add_event(CONSOLE_EVENT_SYSTEM, "Safe mode auto-cleared - boot stable");
+        } else {
+            Serial.println("[SafetyMgr] Boot marked as stable - boot counter reset");
+            console_add_event(CONSOLE_EVENT_SYSTEM, "Boot stable - safety counters reset");
+        }
+
+        saveSafetyState();
     }
 }
 

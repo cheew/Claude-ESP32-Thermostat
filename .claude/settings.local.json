@@ -27,7 +27,14 @@
       "Bash(gh release view:*)",
       "Bash(pio device monitor:*)",
       "Bash(tree:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(gh release upload:*)",
+      "Bash(dir:*)",
+      "Bash(claude mcp add:*)",
+      "Bash(claude mcp:*)",
+      "Bash(~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line.exe:*)",
+      "Bash(\"C:/Users/admin/.platformio/penv/Scripts/python.exe\" \"C:/Users/admin/.platformio/packages/tool-esptoolpy/esptool.py\" --chip esp32s3 --port COM13 erase_region 0x9000 0x5000)",
+      "Bash(\"C:/Users/admin/.platformio/penv/Scripts/python.exe\" \"C:/Users/admin/.platformio/packages/tool-esptoolpy/esptool.py\" --chip esp32s3 --port COM13 --no-stub run)"
     ]
   }
 }

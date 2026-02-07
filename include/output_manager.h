@@ -14,7 +14,7 @@
 #include <Arduino.h>
 
 #define MAX_OUTPUTS 3
-#define MAX_SCHEDULE_SLOTS 8
+#define MAX_SCHEDULE_SLOTS 12
 
 /**
  * Sensor health states
@@ -55,7 +55,9 @@ typedef struct {
     uint8_t hour;
     uint8_t minute;
     float targetTemp;
-    char days[8];  // "SMTWTFS" format
+    bool rampToNext;   // Smooth ramp to next slot (vs instant jump)
+    char days[8];      // "SMTWTFS" format - which days active
+    char label[16];    // "Dawn", "Basking", "Night", etc.
 } ScheduleSlot_t;
 
 /**
@@ -76,7 +78,8 @@ typedef enum {
     CONTROL_MODE_PID,         // PID temperature control
     CONTROL_MODE_ONOFF,       // Simple thermostat (on/off)
     CONTROL_MODE_SCHEDULE,    // Schedule-based control
-    CONTROL_MODE_TIME_PROP    // Time-proportional control (PID with timed cycles)
+    CONTROL_MODE_TIME_PROP,   // Time-proportional control (PID with timed cycles)
+    CONTROL_MODE_WEATHER      // Weather sync - target follows outdoor forecast
 } ControlMode_t;
 
 /**
@@ -253,7 +256,8 @@ void output_manager_set_time_prop_params(int outputIndex, uint8_t cycleSec,
  * @return true if successful
  */
 bool output_manager_set_schedule_slot(int outputIndex, int slotIndex,
-                                      bool enabled, uint8_t hour, uint8_t minute, float targetTemp);
+                                      bool enabled, uint8_t hour, uint8_t minute, float targetTemp,
+                                      const char* days = "", bool rampToNext = false, const char* label = "");
 
 /**
  * Load configuration from preferences

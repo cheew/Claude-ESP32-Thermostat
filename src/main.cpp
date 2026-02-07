@@ -31,33 +31,34 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 
-// Include network modules (Phase 2)
+// Include network modules
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "web_server.h"
 
-// Include control modules (Phase 3)
+// Include control modules
 #include "system_state.h"
+#include "profile_manager.h"
+#include "weather_client.h"
 
-// Include hardware modules (Phase 4)
+// Include hardware modules
 #include "display_manager.h"
-
-// Include hardware modules (Phase 5 - Multi-output)
 #include "sensor_manager.h"
 #include "output_manager.h"
 
-// Include utilities (Phase 6)
+// Include utilities
 #include "logger.h"
 #include "temp_history.h"
 #include "console.h"
 #include "safety_manager.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "2.4.0"
+#define FIRMWARE_VERSION "2.5.0"
 
 // Hardware configuration
-#define ONE_WIRE_BUS 4  // DS18B20 OneWire bus pin
+#define ONE_WIRE_BUS 17  // DS18B20 OneWire bus pin (GPIO 17 on ESP32-S3)
 
 // Timing
 unsigned long lastSensorRead = 0;
@@ -108,6 +109,21 @@ void setup() {
         Serial.println("!!! SAFE MODE ACTIVE - LIMITED FUNCTIONALITY !!!");
         logger_add("SAFE MODE ACTIVE");
     }
+
+    // Initialize LittleFS filesystem (profiles, wizard, weather cache)
+    if (!LittleFS.begin(true)) {
+        Serial.println("[LittleFS] Mount failed!");
+        logger_add("LittleFS mount FAILED");
+    } else {
+        Serial.println("[LittleFS] Mounted successfully");
+        logger_add("LittleFS mounted");
+    }
+
+    // Initialize animal profile manager
+    profile_manager_init();
+
+    // Initialize weather client (loads config + cache from LittleFS)
+    weather_client_init();
 
     // Initialize TFT display (3-output support)
     display_init();
@@ -253,6 +269,7 @@ void loop() {
     if (!wifi_is_ap_mode()) {
         mqtt_task();
         cloud_mqtt_task();
+        weather_client_task();
     }
 
     webserver_task();

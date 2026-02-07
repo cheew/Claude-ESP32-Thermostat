@@ -16,14 +16,15 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 
-// Display configuration (from platformio.ini)
-#define TFT_CS    15
-#define TFT_DC    2
-#define TFT_RST   33
-#define TFT_MOSI  23
-#define TFT_SCLK  18
+// Display configuration (from platformio.ini) - ESP32-S3 pins
+#define TFT_CS    10
+#define TFT_DC    9
+#define TFT_RST   8
+#define TFT_MOSI  11
+#define TFT_MISO  13
+#define TFT_SCLK  12
 
-#define TOUCH_CS  22
+#define TOUCH_CS  21
 
 // Screen dimensions
 #define SCREEN_WIDTH  240

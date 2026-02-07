@@ -4,7 +4,7 @@
 // ============================================
 // FIRMWARE INFORMATION
 // ============================================
-#define FIRMWARE_VERSION "2.4.0"
+#define FIRMWARE_VERSION "2.5.0"
 #define DEVICE_MODEL "ESP32 Reptile Thermostat"
 #define MANUFACTURER "DIY"
 
@@ -13,25 +13,25 @@
 // ============================================
 
 // Temperature Sensor (DS18B20)
-#define ONE_WIRE_BUS 4           // GPIO4 - Temperature sensor data
+#define ONE_WIRE_BUS 17          // GPIO17 - Temperature sensor data (OneWire bus)
 
 // AC Dimmer (RobotDyn)
-#define DIMMER_HEAT_PIN 5        // GPIO5 - PWM control for heat dimmer
-#define DIMMER_LIGHT_PIN 25      // GPIO25 - PWM control for light dimmer (future)
-#define ZEROCROSS_PIN 27         // GPIO27 - Zero-cross detection (shared)
+#define DIMMER_HEAT_PIN 15       // GPIO15 - PWM control for heat dimmer
+#define DIMMER_LIGHT_PIN 6       // GPIO6 - PWM control for light dimmer (future)
+#define ZEROCROSS_PIN 16         // GPIO16 - Zero-cross detection (shared)
 
-// TFT Display (ILI9341 - JC2432S028)
-// SPI pins defined in TFT_eSPI User_Setup.h:
-// MOSI = GPIO 23
-// MISO = GPIO 19
-// SCK  = GPIO 18
-// CS   = GPIO 15
-// DC   = GPIO 2
-// RST  = GPIO 33
-#define TFT_CS 15
-#define TFT_DC 2
-#define TFT_RST 33
-#define TOUCH_CS 22              // Touch controller CS
+// TFT Display (ILI9341) - ESP32-S3 SPI pins
+// SPI pins defined in platformio.ini build flags:
+// MOSI = GPIO 11
+// MISO = GPIO 13
+// SCK  = GPIO 12
+// CS   = GPIO 10
+// DC   = GPIO 9
+// RST  = GPIO 8
+#define TFT_CS 10
+#define TFT_DC 9
+#define TFT_RST 8
+#define TOUCH_CS 21              // Touch controller CS
 
 // ============================================
 // DISPLAY SETTINGS

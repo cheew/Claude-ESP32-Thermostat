@@ -5,15 +5,19 @@
 
 #include "output_manager.h"
 #include "sensor_manager.h"
+#include "weather_client.h"
+#include "profile_manager.h"
 #include "console.h"
 #include <RBDdimmer.h>
 #include <Preferences.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 
-// Hardware pin assignments
-#define OUTPUT1_PIN 5      // AC Dimmer PWM
-#define OUTPUT2_PIN 14     // SSR control
-#define OUTPUT3_PIN 32     // SSR control
-#define ZEROCROSS_PIN 27   // Shared zero-cross for dimmer
+// Hardware pin assignments (ESP32-S3 - per PINOUT_WIRING.md)
+#define OUTPUT1_PIN 15     // AC Dimmer PWM (GPIO 15)
+#define OUTPUT2_PIN 5      // SSR control (GPIO 5)
+#define OUTPUT3_PIN 6      // SSR control (GPIO 6)
+#define ZEROCROSS_PIN 16   // Shared zero-cross for dimmer (GPIO 16)
 
 // PID limits
 #define PID_OUTPUT_MIN 0
@@ -260,6 +264,34 @@ static void updateOutput(int index) {
                 output->heating = false;
             }
             break;
+
+        case CONTROL_MODE_WEATHER:
+            // Weather sync mode: target follows outdoor forecast, clamped to profile bounds.
+            // Uses PID to reach the weather-derived target temperature.
+            {
+                float baseTarget = output->targetTemp;
+
+                // Get profile bounds for clamping
+                const char* activeId = profile_manager_get_active_id();
+                if (activeId && strlen(activeId) > 0) {
+                    AnimalProfile_t profile;
+                    if (profile_manager_load(activeId, &profile)) {
+                        baseTarget = (profile.tempDayMin + profile.tempDayMax) / 2.0f;
+                        output->targetTemp = weather_client_adjust_target(
+                            profile.tempDayMin, profile.tempDayMax, baseTarget);
+                    }
+                }
+
+                if (sensor_manager_is_valid_temp(output->currentTemp)) {
+                    updatePID(index);
+                    output->lastValidPower = output->currentPower;
+                } else {
+                    setOutputPower(index, 0);
+                    output->currentPower = 0;
+                    output->heating = false;
+                }
+            }
+            break;
     }
 }
 
@@ -420,6 +452,17 @@ static void updateTimeProp(int index) {
 /**
  * Update schedule control
  */
+static bool isSlotActiveToday(const ScheduleSlot_t* slot, int dayOfWeek) {
+    // If days field is empty, slot is active every day
+    if (strlen(slot->days) == 0) return true;
+
+    const char dayChars[] = "SMTWTFS";
+    if (dayOfWeek < 0 || dayOfWeek > 6) return true;
+    char todayChar = dayChars[dayOfWeek];
+
+    return (strchr(slot->days, todayChar) != NULL);
+}
+
 static void updateSchedule(int index) {
     OutputConfig_t* output = &outputs[index];
 
@@ -435,15 +478,15 @@ static void updateSchedule(int index) {
     int currentHour = timeinfo.tm_hour;
     int currentMinute = timeinfo.tm_min;
     int currentTotalMinutes = currentHour * 60 + currentMinute;
+    int dayOfWeek = timeinfo.tm_wday; // 0=Sunday, 6=Saturday
 
-    // Find active schedule slot
+    // Find active schedule slot (most recent past slot that is active today)
     int activeSlot = -1;
-    int minDiff = 24 * 60;  // Max difference in minutes
+    int minDiff = 24 * 60;
 
     for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
-        if (!output->schedule[i].enabled) {
-            continue;
-        }
+        if (!output->schedule[i].enabled) continue;
+        if (!isSlotActiveToday(&output->schedule[i], dayOfWeek)) continue;
 
         int slotTotalMinutes = output->schedule[i].hour * 60 + output->schedule[i].minute;
         int diff = currentTotalMinutes - slotTotalMinutes;
@@ -454,9 +497,73 @@ static void updateSchedule(int index) {
         }
     }
 
+    // If no slot found today before current time, wrap around to latest slot from yesterday
+    if (activeSlot < 0) {
+        int latestSlotTime = -1;
+        for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+            if (!output->schedule[i].enabled) continue;
+            // Check if it was active yesterday
+            int yesterday = (dayOfWeek + 6) % 7;
+            if (!isSlotActiveToday(&output->schedule[i], yesterday)) continue;
+
+            int slotTime = output->schedule[i].hour * 60 + output->schedule[i].minute;
+            if (slotTime > latestSlotTime) {
+                latestSlotTime = slotTime;
+                activeSlot = i;
+            }
+        }
+    }
+
     if (activeSlot >= 0) {
+        float targetTemp = output->schedule[activeSlot].targetTemp;
+
+        // Temperature ramping: interpolate between active slot and next slot
+        if (output->schedule[activeSlot].rampToNext) {
+            // Find next enabled slot after active slot (by time)
+            int nextSlot = -1;
+            int activeTime = output->schedule[activeSlot].hour * 60 + output->schedule[activeSlot].minute;
+            int smallestGap = 24 * 60 + 1;
+
+            for (int i = 0; i < MAX_SCHEDULE_SLOTS; i++) {
+                if (i == activeSlot || !output->schedule[i].enabled) continue;
+                if (!isSlotActiveToday(&output->schedule[i], dayOfWeek)) continue;
+
+                int slotTime = output->schedule[i].hour * 60 + output->schedule[i].minute;
+                int gap = slotTime - activeTime;
+                if (gap <= 0) gap += 24 * 60; // Wrap around midnight
+
+                if (gap < smallestGap) {
+                    smallestGap = gap;
+                    nextSlot = i;
+                }
+            }
+
+            if (nextSlot >= 0 && smallestGap > 0) {
+                float nextTemp = output->schedule[nextSlot].targetTemp;
+                // Calculate interpolation progress (0.0 to 1.0)
+                float progress = (float)minDiff / (float)smallestGap;
+                if (progress > 1.0f) progress = 1.0f;
+                targetTemp = output->schedule[activeSlot].targetTemp +
+                             (nextTemp - output->schedule[activeSlot].targetTemp) * progress;
+            }
+        }
+
+        // Weather-driven adjustment: shift target within active profile bounds
+        if (weather_client_is_available()) {
+            const char* activeId = profile_manager_get_active_id();
+            if (activeId && strlen(activeId) > 0) {
+                AnimalProfile_t profile;
+                if (profile_manager_load(activeId, &profile)) {
+                    // Use day range as bounds for weather adjustment
+                    targetTemp = weather_client_adjust_target(
+                        profile.tempDayMin, profile.tempDayMax, targetTemp);
+                }
+            }
+        }
+
         // Apply schedule target temperature
-        output->targetTemp = output->schedule[activeSlot].targetTemp;
+        output->targetTemp = targetTemp;
+
         // Use PID to reach target
         if (sensor_manager_is_valid_temp(output->currentTemp)) {
             updatePID(index);
@@ -672,7 +779,8 @@ void output_manager_set_time_prop_params(int outputIndex, uint8_t cycleSec,
  * Set schedule slot
  */
 bool output_manager_set_schedule_slot(int outputIndex, int slotIndex,
-                                      bool enabled, uint8_t hour, uint8_t minute, float targetTemp) {
+                                      bool enabled, uint8_t hour, uint8_t minute, float targetTemp,
+                                      const char* days, bool rampToNext, const char* label) {
     if (outputIndex < 0 || outputIndex >= MAX_OUTPUTS) {
         return false;
     }
@@ -683,10 +791,26 @@ bool output_manager_set_schedule_slot(int outputIndex, int slotIndex,
         return false;
     }
 
-    outputs[outputIndex].schedule[slotIndex].enabled = enabled;
-    outputs[outputIndex].schedule[slotIndex].hour = hour;
-    outputs[outputIndex].schedule[slotIndex].minute = minute;
-    outputs[outputIndex].schedule[slotIndex].targetTemp = targetTemp;
+    ScheduleSlot_t* slot = &outputs[outputIndex].schedule[slotIndex];
+    slot->enabled = enabled;
+    slot->hour = hour;
+    slot->minute = minute;
+    slot->targetTemp = targetTemp;
+    slot->rampToNext = rampToNext;
+
+    if (days) {
+        strncpy(slot->days, days, sizeof(slot->days) - 1);
+        slot->days[sizeof(slot->days) - 1] = '\0';
+    } else {
+        slot->days[0] = '\0';
+    }
+
+    if (label) {
+        strncpy(slot->label, label, sizeof(slot->label) - 1);
+        slot->label[sizeof(slot->label) - 1] = '\0';
+    } else {
+        slot->label[0] = '\0';
+    }
 
     return true;
 }
@@ -738,23 +862,34 @@ void output_manager_load_config(void) {
         outputs[i].capPowerPct = prefs.getUChar("capPowerPct", DEFAULT_CAP_POWER_PCT);
         outputs[i].autoResumeOnSensorOk = prefs.getBool("autoResume", false);
 
-        // Load schedule
-        for (int j = 0; j < MAX_SCHEDULE_SLOTS; j++) {
-            char key[16];
-            snprintf(key, sizeof(key), "sch%d_en", j);
-            outputs[i].schedule[j].enabled = prefs.getBool(key, false);
-
-            snprintf(key, sizeof(key), "sch%d_hr", j);
-            outputs[i].schedule[j].hour = prefs.getUChar(key, 0);
-
-            snprintf(key, sizeof(key), "sch%d_min", j);
-            outputs[i].schedule[j].minute = prefs.getUChar(key, 0);
-
-            snprintf(key, sizeof(key), "sch%d_temp", j);
-            outputs[i].schedule[j].targetTemp = prefs.getFloat(key, 25.0f);
-        }
-
         prefs.end();
+
+        // Load schedule from LittleFS
+        char schPath[40];
+        snprintf(schPath, sizeof(schPath), "/config/output%d_schedule.json", i + 1);
+        File schFile = LittleFS.open(schPath, "r");
+        if (schFile) {
+            DynamicJsonDocument doc(4096);
+            DeserializationError err = deserializeJson(doc, schFile);
+            schFile.close();
+            if (!err) {
+                JsonArray slots = doc["slots"].as<JsonArray>();
+                int j = 0;
+                for (JsonObject slot : slots) {
+                    if (j >= MAX_SCHEDULE_SLOTS) break;
+                    outputs[i].schedule[j].enabled = slot["en"] | false;
+                    outputs[i].schedule[j].hour = slot["hr"] | 0;
+                    outputs[i].schedule[j].minute = slot["min"] | 0;
+                    outputs[i].schedule[j].targetTemp = slot["temp"] | 25.0f;
+                    outputs[i].schedule[j].rampToNext = slot["ramp"] | false;
+                    strncpy(outputs[i].schedule[j].days,
+                            slot["days"] | "", sizeof(outputs[i].schedule[j].days) - 1);
+                    strncpy(outputs[i].schedule[j].label,
+                            slot["lbl"] | "", sizeof(outputs[i].schedule[j].label) - 1);
+                    j++;
+                }
+            }
+        }
     }
 
     Serial.println("[OutputMgr] Configuration loaded");
@@ -799,23 +934,29 @@ void output_manager_save_config(void) {
         prefs.putUChar("capPowerPct", outputs[i].capPowerPct);
         prefs.putBool("autoResume", outputs[i].autoResumeOnSensorOk);
 
-        // Save schedule
-        for (int j = 0; j < MAX_SCHEDULE_SLOTS; j++) {
-            char key[16];
-            snprintf(key, sizeof(key), "sch%d_en", j);
-            prefs.putBool(key, outputs[i].schedule[j].enabled);
-
-            snprintf(key, sizeof(key), "sch%d_hr", j);
-            prefs.putUChar(key, outputs[i].schedule[j].hour);
-
-            snprintf(key, sizeof(key), "sch%d_min", j);
-            prefs.putUChar(key, outputs[i].schedule[j].minute);
-
-            snprintf(key, sizeof(key), "sch%d_temp", j);
-            prefs.putFloat(key, outputs[i].schedule[j].targetTemp);
-        }
-
         prefs.end();
+
+        // Save schedule to LittleFS
+        LittleFS.mkdir("/config");
+        char schPath[40];
+        snprintf(schPath, sizeof(schPath), "/config/output%d_schedule.json", i + 1);
+        File schFile = LittleFS.open(schPath, "w");
+        if (schFile) {
+            DynamicJsonDocument doc(4096);
+            JsonArray slots = doc.createNestedArray("slots");
+            for (int j = 0; j < MAX_SCHEDULE_SLOTS; j++) {
+                JsonObject slot = slots.createNestedObject();
+                slot["en"] = outputs[i].schedule[j].enabled;
+                slot["hr"] = outputs[i].schedule[j].hour;
+                slot["min"] = outputs[i].schedule[j].minute;
+                slot["temp"] = outputs[i].schedule[j].targetTemp;
+                slot["ramp"] = outputs[i].schedule[j].rampToNext;
+                slot["days"] = outputs[i].schedule[j].days;
+                slot["lbl"] = outputs[i].schedule[j].label;
+            }
+            serializeJson(doc, schFile);
+            schFile.close();
+        }
     }
 
     Serial.println("[OutputMgr] Configuration saved");
@@ -859,6 +1000,7 @@ const char* output_manager_get_mode_name(ControlMode_t mode) {
         case CONTROL_MODE_ONOFF: return "OnOff";
         case CONTROL_MODE_SCHEDULE: return "Schedule";
         case CONTROL_MODE_TIME_PROP: return "TimeProp";
+        case CONTROL_MODE_WEATHER: return "Weather";
         default: return "Unknown";
     }
 }

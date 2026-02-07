@@ -1,0 +1,17 @@
+{
+  "id": "leopard_gecko",
+  "name": "Leopard Gecko",
+  "species": "Eublepharis macularius",
+  "region": "South Asian Arid Grassland",
+  "temp_day_range": [26, 30],
+  "temp_night_range": [21, 24],
+  "basking_temp": 32,
+  "humidity_day": [30, 40],
+  "humidity_night": [40, 50],
+  "photoperiod_hours": 12,
+  "seasons": {
+    "dry": {"temp_modifier": 0, "humidity_modifier": -5},
+    "wet": {"temp_modifier": -1, "humidity_modifier": 10}
+  },
+  "notes": "Belly heat preferred over overhead. Moist hide essential for shedding. Crepuscular - most active at dawn and dusk. UVB optional but beneficial."
+}

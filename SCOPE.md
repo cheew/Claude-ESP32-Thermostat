@@ -1,21 +1,24 @@
 # ESP32 Thermostat - Future Features & Roadmap
 
-**Document Version:** 1.2
-**Last Updated:** January 16, 2026
-**Current Project Version:** v2.2.0 (dev)
+**Document Version:** 2.0
+**Last Updated:** February 7, 2026
+**Current Project Version:** v2.5.0
+**Hardware:** ESP32-S3-WROVER-1 N16R8 (16MB flash, 8MB PSRAM)
 
 ---
 
 ## 🎯 Project Vision
 
-Transform the ESP32 thermostat from a single-output heating controller into a **comprehensive reptile habitat environmental control system** supporting:
-- Multiple heating/lighting outputs
-- Multiple temperature sensors
-- Flexible output types (AC dimming, SSR pulse, relay on/off)
+Transform the ESP32 thermostat from a generic heating controller into a **personal, convenient, unique, and fun reptile habitat environmental control system** supporting:
+- **Animal-specific habitat profiles** with species-appropriate temperature ranges
+- **Setup wizard** for guided first-boot configuration with animal selection
+- **Weather integration** that adjusts habitat conditions based on outdoor weather
+- Multiple heating/lighting outputs with rebuilt schedule system
+- Multiple temperature sensors with day-of-week scheduling and temperature ramping
 - TFT touch display for standalone operation
 - Optional PIN security for web interface
 - Simple/Advanced web UI modes
-- Professional Android app for remote management
+- LittleFS filesystem for static files, profiles, and data caching
 
 ---
 
@@ -204,6 +207,158 @@ int y = map(p.x, 200, 3800, 0, SCREEN_HEIGHT);  // Raw X -> Screen Y
 - Schedule configuration
 
 Mode toggle via orange dropdown in navigation bar. Preference persists.
+
+---
+
+---
+
+## ✅ ESP32-S3 Migration (COMPLETED v2.5.0)
+
+### Overview
+Migrated from ESP32 to **ESP32-S3-WROVER-1 N16R8** to unlock flash/RAM constraints:
+- **16MB flash** (was 4MB) - removes all flash space concerns
+- **8MB PSRAM** - available for future large data structures
+- **LittleFS** filesystem (~8MB partition) for static HTML, JSON profiles, weather cache
+- Custom partition table: 4MB app0 + 4MB app1 (OTA) + 8MB LittleFS
+
+### Key Changes
+- Board: `esp32-s3-devkitc-1` in platformio.ini
+- GPIO 25 reassigned to GPIO 6 (unavailable on S3)
+- All other GPIO pins (TFT, sensors, outputs) remain compatible
+- LittleFS initialized at boot, serves static files for wizard/profiles
+
+---
+
+## ✅ Animal Habitat Profiles (COMPLETED v2.5.0)
+
+### Overview
+JSON-based animal habitat profiles stored in LittleFS that define species-appropriate temperature ranges, humidity, photoperiod, and seasonal modifiers.
+
+### Included Profiles (5 initial)
+| Profile | Species | Day Range | Night Range | Basking | Photoperiod |
+|---------|---------|-----------|-------------|---------|-------------|
+| Bearded Dragon | *Pogona vitticeps* | 28-32°C | 22-25°C | 40°C | 12h |
+| Ball Python | *Python regius* | 26-30°C | 24-26°C | 32°C | 12h |
+| Leopard Gecko | *Eublepharis macularius* | 26-30°C | 21-24°C | 32°C | 14h |
+| Crested Gecko | *Correlophus ciliatus* | 22-26°C | 18-22°C | 28°C | 12h |
+| Corn Snake | *Pantherophis guttatus* | 24-28°C | 20-23°C | 30°C | 12h |
+
+### Technical Details
+- **Module:** `profile_manager.h/cpp` - init/load/apply/list pattern
+- **Storage:** `/profiles/*.json` in LittleFS (ArduinoJson v6 parsing)
+- **API Endpoints:**
+  - `GET /api/v1/profiles` - List all available profiles
+  - `GET /api/v1/profiles/active` - Get currently active profile
+  - `POST /api/v1/profiles/apply` - Apply profile to all outputs
+- **Profile Application:** Sets output targets, auto-generates 7-slot schedule (Night/Dawn/Morning/Basking/Afternoon/Evening/Dusk)
+- **Active profile ID** persisted in Preferences across reboots
+
+---
+
+## ✅ Schedule System Rebuild (COMPLETED v2.5.0)
+
+### Overview
+Complete rewrite of the schedule system fixing all 8 known bugs and adding new features.
+
+### Improvements Over v2.4.0
+- **12 slots per output** (was 8) for finer-grained day/night cycles
+- **Day-of-week filtering** - slots can be active only on specific days (SMTWTFS format)
+- **Temperature ramping** - smooth linear interpolation between adjacent slots
+- **Labels** - human-readable names per slot ("Dawn", "Basking Peak", "Night")
+- **Save/load fix** - days, rampToNext, and label fields now properly persisted
+- **API fix** - accepts both "targetTemp" and "target" field names
+- **JSON buffer fix** - DynamicJsonDocument(4096) prevents truncation
+- **CSV import/export** - download/upload schedules as CSV files
+- **Always visible** - Schedule link shown in both Simple and Advanced UI modes
+
+### Schedule Slot Structure
+```cpp
+typedef struct {
+    bool enabled;
+    uint8_t hour;        // 0-23
+    uint8_t minute;      // 0-59
+    float targetTemp;
+    bool rampToNext;     // Smooth ramp to next slot
+    char days[8];        // "SMTWTFS" format
+    char label[16];      // "Dawn", "Basking", etc.
+} ScheduleSlot_t;
+```
+
+---
+
+## ✅ Setup Wizard (COMPLETED v2.5.0)
+
+### Overview
+Multi-step first-run wizard served from LittleFS, with animal profile selection as the centerpiece.
+
+### Wizard Steps
+1. **Welcome** - Device name configuration
+2. **Animal Selection** - Visual card grid of animal profiles with temperature preview
+3. **Climate Preset** - Auto from profile / Manual custom / Weather sync
+4. **Season Mode** - Year-round / Dry season / Wet season
+5. **Output Configuration** - Per-output name, control mode selection
+6. **Network** - MQTT broker configuration (optional)
+7. **Review & Apply** - Summary of all settings, one-click apply
+
+### Technical Details
+- **Files:** `data/wizard/wizard.html`, `wizard.css`, `wizard.js` (served from LittleFS)
+- **First-boot detection:** Preferences key `wizard_done` (bool)
+- **Auto-redirect:** Root `/` redirects to `/wizard` when `wizard_done` is false
+- **Re-run:** Settings page "Re-run Setup Wizard" clears the flag
+
+---
+
+## ✅ Weather Integration (COMPLETED v2.5.0)
+
+### Overview
+OpenWeatherMap integration that fetches outdoor weather data and optionally adjusts habitat temperatures within animal profile bounds. Includes full 24-hour forecast coverage and a standalone Weather Sync control mode.
+
+### Features
+- **HTTP API client** fetching current conditions from OpenWeatherMap
+- **5-day/3-hour forecast API** (`/data/2.5/forecast?cnt=8`) provides 8 forecast entries (24h coverage) in a single call
+- **Configurable interval** (1-6 hours between fetches)
+- **LittleFS cache** (`/cache/weather.json`, `/cache/weather_hist.json`) survives reboots - enables offline operation by repeating last 24h of forecast data
+- **Timezone-aware matching** - forecast entries store remote city local time; `adjust_target()` picks the entry closest to the ESP32's current local time
+- **Weather-adjusted targets:** Shifts schedule temperatures +/- 1.5°C based on outdoor temp
+  - Hot outdoor day → slightly warmer basking spot
+  - Cold outdoor day → slightly cooler ambient
+  - Always clamped within active profile's min/max bounds
+- **Graceful fallback:** Uses unmodified schedule targets when weather unavailable
+- **Weather Sync control mode** (`CONTROL_MODE_WEATHER = 6`) - standalone mode that derives target from profile midpoint adjusted by outdoor forecast, using PID control
+- **24-hour forecast graph** on Outputs page when Weather Sync mode is selected (HTML5 Canvas with grid, filled area, time marker, entry annotations)
+- **Mini forecast graph** on Simple mode home page for weather-synced outputs
+- **Weather status on Info page** - outdoor temp, conditions, fetch age, forecast entry count
+- **Schedule page notice** - banner indicating when output is in Weather Sync mode
+
+### API Endpoints
+- `GET /api/v1/weather` - Current weather data (temp, humidity, description, clouds) plus forecast entries array
+- `POST /api/v1/weather/config` - Configure API key, city, interval, enable/disable
+
+### Settings Page
+Weather configuration section in Settings with:
+- Enable/disable toggle
+- API key field (masked)
+- City name input
+- Fetch interval selector (1-6 hours)
+- Live status display (current temp and description)
+
+---
+
+## ✅ UI/UX Improvements (COMPLETED v2.5.0)
+
+### Help System
+- **Contextual help modals** (? buttons) on Outputs, Sensors, and Schedule pages
+- Dark mode compatible overlay with close-on-click-outside behavior
+
+### Display Improvements
+- **Real-time clock timestamps** in system logs and console (NTP-synced, uptime fallback)
+- **Dark mode fixes** for simple home screen cards and elements
+- **Animal symbol in header** when a profile is active
+- **Wizard color scheme** updated from blue to green to match main UI
+- **24-hour schedule graph** on Schedule page (live-updating Canvas)
+- **Schedule mini-graphs** in Simple mode home page per-output cards
+- **Weather sync indicator** per output showing when weather is influencing target
+- **Re-run wizard button** in Settings page
 
 ---
 
@@ -773,9 +928,9 @@ build_flags =
 
 ---
 
-## 🧙 Priority 3: Setup Wizard
+## ✅ Priority 3: Setup Wizard (COMPLETED v2.5.0 - See above)
 
-### Overview
+### Overview (Original Spec)
 Guided first-run setup wizard to configure:
 1. Device name and WiFi credentials
 2. MQTT broker settings (optional)
@@ -1121,28 +1276,22 @@ void wifi_task(void) {
 
 ## 📊 Technical Considerations
 
-### Memory Usage Estimates
+### Memory Usage (ESP32-S3-WROVER-1 N16R8)
 
-**Current Usage (v1.9.0):**
-- Flash: 85.7% (~1.11 MB / 1.31 MB)
-- RAM: 19.8% (~64 KB / 327 KB)
+**Hardware Upgrade (v2.5.0):**
+- **Flash:** 16MB total (was 4MB) - flash constraints eliminated
+  - app0: 4MB, app1: 4MB (OTA), LittleFS: ~8MB
+- **PSRAM:** 8MB available for large data structures
+- **RAM:** ~520 KB SRAM (was 327 KB)
 
-**Multi-Output Addition (estimated):**
-- Flash: +10 KB (duplicate control logic × 3)
-- RAM: +2 KB per output (state data × 3) = +6 KB total
-- **Projected:** Flash 89%, RAM 21% ✅ **Safe**
+**LittleFS Usage:**
+- Animal profiles (5 JSON files): ~5 KB
+- Setup wizard (HTML/CSS/JS): ~15 KB
+- Weather cache: ~1 KB
+- **Total used:** ~21 KB of 8MB (0.3%) - extensive room for growth
 
-**Setup Wizard (estimated):**
-- Flash: +15 KB (HTML pages, wizard state machine)
-- RAM: +1 KB (wizard state)
-- **Projected:** Flash 92%, RAM 22% ✅ **Safe**
-
-**Android App:**
-- No impact on ESP32 (uses existing APIs)
-
-**Total Projected:**
-- Flash: ~92% (safe, allows room for future updates)
-- RAM: ~22% (plenty of headroom)
+**Firmware Size:**
+- All modules including profiles, weather, wizard backend: well within 4MB app partition
 
 ### Performance Impact
 
@@ -1214,54 +1363,57 @@ void wifi_task(void) {
    - Maintain Home Assistant integration
    - 3 separate climate entities
 
-### 🔜 Phase 3: TFT Display Integration (NEXT)
-5. **TFT display hardware integration** (30-40 hours)
+### ✅ Phase 3: TFT Display Integration (COMPLETED v2.3.0)
+5. **TFT display hardware integration**
    - Standalone operation without web/app
    - Touch controls for temperature adjustment
-   - Professional appearance
-   - Offline operation capability
-   - **High user value:** Physical interaction preferred by many users
-   - **Blocker:** GPIO 4 conflict requires OneWire migration
+   - Partial display updates (no flashing)
 
-### Phase 4: User Experience
-6. **Setup wizard** (25 hours)
-   - Dramatically improves first-run experience
-   - Reduces support burden
-   - Makes product more professional
-   - **Can leverage display for guided setup**
+### ✅ Phase 4: Animal Habitat Features (COMPLETED v2.5.0)
+6. **ESP32-S3 migration** - 16MB flash, 8MB PSRAM, LittleFS
+7. **Animal profile system** - 5 species profiles with auto-schedule generation
+8. **Schedule rebuild** - 12 slots, day-of-week, ramping, CSV import/export
+9. **Setup wizard** - 7-step first-boot wizard with animal selection
+10. **Weather integration** - OpenWeatherMap outdoor temp adjustment
 
-### Phase 5: Remote Management
-7. **Android app development** (100+ hours)
-   - Significant time investment
-   - High user value
-   - Enables remote management
-   - Opens door to monetization (premium features)
+### 🔜 Phase 5: Remote Management (NEXT)
+11. **Android app development** (100+ hours)
+    - Significant time investment
+    - High user value
+    - Enables remote management
+    - Opens door to monetization (premium features)
 
 ### Phase 6: Polish & Optimization
-8. **Performance tuning** (5 hours)
-   - Optimize multi-sensor reads
-   - Reduce memory usage where possible
-   - Improve web page load times
+12. **Performance tuning** (5 hours)
+    - Optimize multi-sensor reads
+    - Reduce memory usage where possible
+    - Improve web page load times
 
-9. **Documentation & guides** (8 hours)
-   - User manual
-   - Setup guide with photos
-   - Troubleshooting guide
-   - Video tutorials
+13. **Documentation & guides** (8 hours)
+    - User manual
+    - Setup guide with photos
+    - Troubleshooting guide
+    - Video tutorials
 
 ---
 
 ## 💡 Future Enhancements (Post-Roadmap)
 
+### Animal Habitat Expansion
+- **More species profiles** - Community-contributed JSON profiles
+- **Custom profile editor** - Web UI for creating/editing profiles
+- **Breeding mode** - Season cycling with gradual temperature changes
+- **Photoperiod control** - Automatic light scheduling from profile data
+
 ### Hardware Additions
 - **Humidity Control:**
   - DHT22 or SHT31 sensors
   - Misting system control (relay or SSR)
-  - Humidity scheduling
+  - Humidity scheduling from animal profiles
 
 - **Lighting Control:**
   - RGB LED strips (PWM control)
-  - Sunrise/sunset simulation
+  - Sunrise/sunset simulation using photoperiod from profiles
   - UVB timer management
 
 - **Remote Sensors:**
@@ -1273,6 +1425,11 @@ void wifi_task(void) {
   - Remote access without local network
   - Data logging to cloud service
   - Mobile app notifications over internet
+
+- **Weather Enhancements:**
+  - 7-day forecast caching for predictive adjustment
+  - Seasonal auto-detection from weather trends
+  - Multiple weather provider support
 
 - **Machine Learning:**
   - Adaptive PID tuning based on thermal mass
@@ -1313,4 +1470,4 @@ void wifi_task(void) {
 
 **Document Status:** Living document - updated as features are implemented and new ideas emerge.
 
-**Next Review:** After Phase 2 completion (multi-output system)
+**Next Review:** After Phase 5 completion (Android app / remote management)

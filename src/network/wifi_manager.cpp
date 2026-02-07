@@ -11,7 +11,7 @@ static const char* DEFAULT_SSID = "mesh";
 static const char* DEFAULT_PASSWORD = "Oasis0asis";
 
 // AP Mode configuration
-static const char* AP_SSID = "ReptileThermostat";
+static char AP_SSID_BUF[32] = "ReptileThermostat";
 static const char* AP_PASSWORD = "thermostat123";
 static const IPAddress AP_IP(192, 168, 4, 1);
 static const IPAddress AP_GATEWAY(192, 168, 4, 1);
@@ -153,21 +153,26 @@ bool wifi_connect(const char* ssid, const char* password) {
  */
 void wifi_start_ap_mode(void) {
     Serial.println("[WiFi] Starting Access Point mode");
-    
+
     apMode = true;
     currentState = WIFI_STATE_AP_MODE;
-    
+
+    // Build unique SSID using last 2 bytes of MAC address
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    snprintf(AP_SSID_BUF, sizeof(AP_SSID_BUF), "Thermostat_%02X%02X", mac[4], mac[5]);
+
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    
+    WiFi.softAP(AP_SSID_BUF, AP_PASSWORD);
+
     Serial.print("[WiFi] AP SSID: ");
-    Serial.println(AP_SSID);
+    Serial.println(AP_SSID_BUF);
     Serial.print("[WiFi] AP IP: ");
     Serial.println(WiFi.softAPIP());
-    
+
     updateIPAddress();
-    strncpy(ssidBuffer, AP_SSID, sizeof(ssidBuffer));
+    strncpy(ssidBuffer, AP_SSID_BUF, sizeof(ssidBuffer));
 }
 
 /**
