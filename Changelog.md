@@ -2,6 +2,97 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.5.0] - 2026-02-07
+
+### Added
+- **ESP32-S3 Migration**: Upgraded from ESP32 to ESP32-S3-WROVER-1 N16R8
+  - 16MB flash (was 4MB), 8MB PSRAM
+  - Custom partition table: 4MB app0 + 4MB app1 (OTA) + 8MB LittleFS
+  - LittleFS filesystem for static files, profiles, and data caching
+- **Animal Habitat Profiles**: JSON-based species profiles stored in LittleFS
+  - 5 built-in profiles: Bearded Dragon, Ball Python, Leopard Gecko, Crested Gecko, Corn Snake
+  - Profile manager module (`profile_manager.h/cpp`) with load/apply/list API
+  - Auto-generates 7-slot schedule (Night/Dawn/Morning/Basking/Afternoon/Evening/Dusk)
+  - Active profile persisted in Preferences across reboots
+- **Setup Wizard**: 7-step first-boot configuration wizard served from LittleFS
+  - Welcome, Animal Selection, Climate Preset, Season Mode, Output Config, Network, Review
+  - Visual animal card grid with temperature preview
+  - Auto-redirect on first boot, re-run button in Settings
+  - Green color scheme matching main UI
+- **Weather Integration**: OpenWeatherMap outdoor weather data
+  - Current conditions API + 5-day/3-hour forecast API (8 entries, 24h coverage)
+  - Timezone-aware matching: forecast entries use remote city local time
+  - LittleFS cache (`/cache/weather.json`, `/cache/weather_hist.json`) for offline resilience
+  - Weather-adjusted targets shift +/- 1.5C within animal profile bounds
+  - Configurable fetch interval (1-6 hours)
+- **Weather Sync Control Mode**: New `CONTROL_MODE_WEATHER` (mode 6)
+  - Standalone control mode deriving target from profile midpoint adjusted by outdoor forecast
+  - PID control with weather-adjusted target temperature
+  - 24-hour forecast graph on Outputs page (HTML5 Canvas)
+  - Mini forecast graph on Simple mode home page
+  - Weather status section on Info page (outdoor temp, conditions, fetch age, forecast count)
+  - Weather mode notice banner on Schedule page
+- **Help System**: Contextual help modals (? buttons) on Outputs, Sensors, and Schedule pages
+  - Dark mode compatible overlay with close-on-click-outside behavior
+- **Schedule System Rebuild**: Complete rewrite of scheduling
+  - 12 slots per output (was 8)
+  - Day-of-week filtering (SMTWTFS format)
+  - Temperature ramping between adjacent slots
+  - Labels per slot ("Dawn", "Basking Peak", "Night")
+  - CSV import/export
+  - 24-hour schedule graph on Schedule page (live-updating Canvas)
+  - Schedule mini-graphs in Simple mode per-output cards
+
+### Changed
+- Firmware version updated to 2.5.0
+- Board target changed to `esp32-s3-devkitc-1` in platformio.ini
+- GPIO 25 reassigned to GPIO 6 (unavailable on S3)
+- Weather API endpoint now includes forecast entries array
+- `is_syncing_output()` accepts both Schedule and Weather control modes
+
+### Fixed
+- **Dark Mode Simple Home Screen**: Fixed remaining dark mode issues on simple mode cards
+- **Real-Time Clock Timestamps**: Logs and console now use NTP-synced timestamps with uptime fallback
+- **Schedule Save/Load**: days, rampToNext, and label fields now properly persisted
+- **Schedule API**: Accepts both "targetTemp" and "target" field names
+- **Schedule JSON Buffer**: DynamicJsonDocument(4096) prevents truncation
+
+### UI Improvements
+- Animal symbol displayed in header when a profile is active
+- Weather sync indicator per output showing when weather influences target
+- Re-run wizard button in Settings page
+- Schedule page always visible in both Simple and Advanced UI modes
+
+### Files Added
+- `include/profile_manager.h` - Profile manager header
+- `src/control/profile_manager.cpp` - Profile manager implementation
+- `include/weather_client.h` - Weather client header
+- `src/network/weather_client.cpp` - Weather client implementation
+- `data/profiles/*.json` - 5 animal habitat profiles
+- `data/wizard/wizard.html` - Setup wizard page
+- `data/wizard/wizard.css` - Setup wizard styles
+- `data/wizard/wizard.js` - Setup wizard logic
+- `partitions.csv` - Custom partition table for ESP32-S3
+
+### Files Modified
+- `include/config.h` - ESP32-S3 GPIO assignments
+- `include/display_manager.h` - S3 pin updates
+- `include/output_manager.h` - Added `CONTROL_MODE_WEATHER` enum
+- `platformio.ini` - ESP32-S3 board config, LittleFS, partition table
+- `src/control/output_manager.cpp` - Weather mode control logic
+- `src/main.cpp` - Profile/weather init, LittleFS setup
+- `src/network/web_server.cpp` - Help modals, weather graphs, forecast API, wizard support
+- `src/network/wifi_manager.cpp` - S3 compatibility
+- `src/utils/console.cpp` - NTP timestamps
+- `src/utils/logger.cpp` - NTP timestamps
+- `src/utils/safety_manager.cpp` - S3 compatibility
+
+### Memory Usage
+- Flash: 30.7% (1,286,853 / 4,194,304 bytes) - ~2.9 MB remaining
+- RAM: 20.9% (68,484 / 327,680 bytes) - ~259 KB free
+
+---
+
 ## [2.4.0] - 2026-02-04
 
 ### Added
