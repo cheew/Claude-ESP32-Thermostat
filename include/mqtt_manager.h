@@ -164,6 +164,12 @@ void mqtt_save_config(const char* server, int port,
  */
 const char* mqtt_get_base_topic(void);
 
+/**
+ * Get MQTT device ID (unique per device)
+ * @return Device ID string (static, do not free)
+ */
+const char* mqtt_get_device_id(void);
+
 // ============================================
 // Cloud MQTT Broker Functions (HiveMQ Cloud)
 // ============================================
