@@ -55,7 +55,7 @@
 #include "safety_manager.h"
 
 // Firmware version
-#define FIRMWARE_VERSION "2.5.0"
+#define FIRMWARE_VERSION "2.5.1"
 
 // Hardware configuration
 #define ONE_WIRE_BUS 17  // DS18B20 OneWire bus pin (GPIO 17 on ESP32-S3)

@@ -2,6 +2,13 @@
 
 All notable changes to the ESP32 Multi-Output Thermostat project are documented here.
 
+## [2.5.1] - 2026-02-07
+
+### Fixed
+- **MQTT Naming Conflicts**: Each device now uses unique MQTT client IDs, base topics, and Home Assistant device IDs derived from the chip ID to prevent disconnects when multiple thermostats run on the same broker.
+
+---
+
 ## [2.5.0] - 2026-02-07
 
 ### Added
